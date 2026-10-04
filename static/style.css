@@ -242,6 +242,19 @@ main {
 .files-filter input[type="checkbox"] { accent-color: var(--accent); }
 #files-search { width: 160px; }
 .files-error { border-bottom: 1px solid var(--line); color: var(--error); font-size: 12px; padding: 10px 14px; flex-shrink: 0; max-height: 100px; overflow: auto; overflow-wrap: anywhere; }
+.upload-progress { --progress-color: var(--accent); padding: 10px 14px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.upload-progress-heading, .upload-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.upload-progress-heading { color: var(--text); font-size: 12px; }
+.upload-progress-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#files-upload-percent, #files-upload-size { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.upload-progress-meta { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.upload-progress progress { display: block; width: 100%; height: 6px; margin: 8px 0; border: 0; border-radius: 3px; overflow: hidden; appearance: none; background: var(--line); color: var(--progress-color); accent-color: var(--progress-color); }
+.upload-progress progress::-webkit-progress-bar { background: var(--line); border-radius: 3px; }
+.upload-progress progress::-webkit-progress-value { background: var(--progress-color); border-radius: 3px; }
+.upload-progress progress::-moz-progress-bar { background: var(--progress-color); border-radius: 3px; }
+.upload-progress[data-state="done"] { --progress-color: var(--success); }
+.upload-progress[data-state="error"] { --progress-color: var(--error); }
+.upload-progress[data-state="partial"] { --progress-color: var(--warning); }
 .files-table-scroll { overflow: auto; flex: 1; min-height: 0; scrollbar-width: thin; scrollbar-color: var(--scrollbar) var(--panel); }
 .files-table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 12px; }
 .files-table th { color: var(--muted); font-weight: 500; font-size: 11px; text-align: left; position: sticky; top: 0; z-index: 1; background: var(--toolbar); }
@@ -303,6 +316,9 @@ main {
   #files-path-form { order: 1; flex-basis: 100%; }
   .files-toolbar button, .files-actions button { padding: 6px 8px; font-size: 10px; }
   .files-actions { padding: 8px 10px; gap: 8px; }
+  .upload-progress { padding: 8px 10px; }
+  .upload-progress-heading { font-size: 11px; }
+  .upload-progress-meta { font-size: 9px; }
   .file-create-actions { gap: 5px; flex-wrap: wrap; }
   .files-filter { width: 100%; justify-content: space-between; }
   #files-search { width: min(170px, 50%); }

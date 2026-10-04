@@ -278,6 +278,52 @@ async function saveFileEditor(event) {
   finally { byId('file-editor-save').disabled = false; byId('file-editor-content').readOnly = false; }
 }
 
+function showUploadProgress(file, index, total, completed) {
+  const panel = byId('files-upload-progress');
+  panel.hidden = false;
+  panel.dataset.state = 'uploading';
+  byId('files-upload-name').textContent = file.name;
+  byId('files-upload-name').title = file.name;
+  byId('files-upload-percent').textContent = '0%';
+  byId('files-upload-bar').value = 0;
+  byId('files-upload-size').textContent = formatBytes(file.size);
+  byId('files-upload-status').textContent = '正在上传 · 第 ' + (index + 1) + '/' + total + ' 个 · ' + completed + ' 个已完成';
+}
+
+function uploadWithProgress(file, path, index, total, completed) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', '/api/files/upload?' + new URLSearchParams({ path }));
+    request.setRequestHeader('X-Ops-Hub-Request', '1');
+    request.upload.onprogress = event => {
+      if (!event.lengthComputable || !event.total) {
+        byId('files-upload-bar').removeAttribute('value');
+        byId('files-upload-percent').textContent = '上传中';
+        return;
+      }
+      const percent = Math.min(100, event.loaded / event.total * 100);
+      byId('files-upload-bar').value = percent;
+      byId('files-upload-percent').textContent = Math.floor(percent) + '%';
+    };
+    request.upload.onload = () => {
+      byId('files-upload-bar').value = 100;
+      byId('files-upload-percent').textContent = '100%';
+      byId('files-upload-status').textContent = '传输完成，正在保存 · 第 ' + (index + 1) + '/' + total + ' 个 · ' + completed + ' 个已完成';
+    };
+    request.onload = () => {
+      let data;
+      try { data = JSON.parse(request.responseText); } catch (_) { data = null; }
+      if (request.status >= 200 && request.status < 300) resolve(data);
+      else reject(new Error(data?.error || request.responseText || '文件上传失败'));
+    };
+    request.onerror = () => reject(new Error('上传失败，网络连接中断'));
+    request.onabort = () => reject(new Error('上传已取消'));
+    const body = new FormData();
+    body.append('file', file);
+    request.send(body);
+  });
+}
+
 async function uploadFiles(files) {
   if (!files.length || fileState.busy || selectedHost) return;
   const path = fileState.path;
@@ -286,16 +332,20 @@ async function uploadFiles(files) {
   let completed = 0;
   const errors = [];
   try {
-    for (const file of files) {
+    for (const [index, file] of files.entries()) {
+      showUploadProgress(file, index, files.length, completed);
       if (file.size > 256 * 1024 * 1024) { errors.push(file.name + '：超过 256 MiB'); continue; }
-      byId('files-summary').textContent = '正在上传 ' + file.name + '（' + (completed + 1) + '/' + files.length + '）';
-      const body = new FormData();
-      body.append('file', file);
       try {
-        await fileRequest('/api/files/upload?' + new URLSearchParams({ path }), { method: 'POST', headers: { 'X-Ops-Hub-Request': '1' }, body });
+        await uploadWithProgress(file, path, index, files.length, completed);
         completed++;
+        byId('files-upload-bar').value = 100;
+        byId('files-upload-percent').textContent = '100%';
       } catch (error) { errors.push(file.name + '：' + error.message); }
     }
+    byId('files-upload-progress').dataset.state = errors.length ? completed ? 'partial' : 'error' : 'done';
+    byId('files-upload-status').textContent = errors.length
+      ? '上传结束 · ' + completed + ' 个成功，' + errors.length + ' 个失败'
+      : '上传完成 · ' + completed + '/' + files.length + ' 个文件';
     await loadFiles();
     if (completed) notify(completed + ' 个文件上传完成');
     if (errors.length) fileError(errors.join('；'));

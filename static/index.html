@@ -62,6 +62,11 @@
           <div class="files-filter"><label><input id="files-hidden" type="checkbox"> 隐藏文件</label><input id="files-search" type="search" aria-label="筛选文件名" placeholder="筛选文件名"></div>
           <input id="files-upload-input" type="file" multiple hidden>
         </div>
+        <div id="files-upload-progress" class="upload-progress" hidden>
+          <div class="upload-progress-heading"><span id="files-upload-name" class="upload-progress-name"></span><span id="files-upload-percent">0%</span></div>
+          <progress id="files-upload-bar" max="100" value="0" aria-label="当前文件上传进度"></progress>
+          <div class="upload-progress-meta"><span id="files-upload-status" role="status" aria-live="polite"></span><span id="files-upload-size"></span></div>
+        </div>
         <div id="files-error" class="files-error" role="alert" hidden></div>
         <div class="files-table-scroll"><table class="files-table"><thead><tr><th scope="col">名称</th><th scope="col">大小</th><th scope="col">修改时间</th><th scope="col">权限</th><th scope="col">操作</th></tr></thead><tbody id="files-list"></tbody></table><p id="files-empty" class="files-empty" role="status">正在读取目录…</p></div>
         <div class="files-footer"><span id="files-summary" role="status" aria-live="polite">本机文件</span><span>上传 ≤ 256 MiB · 文本编辑 ≤ 2 MiB</span></div>
