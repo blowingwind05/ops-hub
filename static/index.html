@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <script src="/static/theme.js"></script>
+  <title>服务器终端 · Ops Hub</title>
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/static/ops-hub.svg?v=lucide-network">
+  <link rel="stylesheet" href="/static/vendor/xterm.css">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/vendor/xterm.js"></script>
+  <script defer src="/static/vendor/addon-fit.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Ops Hub 运维中枢首页"><img class="brand-mark" src="/static/ops-hub.svg?v=lucide-network" width="34" height="34" alt="" aria-hidden="true"><span>OPS<span class="brand-light">HUB</span></span></a>
+    <div class="top-right">
+      <div class="host-switcher" id="host-switcher">
+        <button class="host-pill" id="host-pill" type="button" aria-label="选择服务器" aria-haspopup="menu" aria-expanded="false" aria-controls="host-options"><span class="host-name" id="host-name">本机</span><svg class="host-chevron" width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <div class="host-menu" id="host-menu" hidden>
+          <div class="host-menu-heading"><span>切换服务器</span><button id="refresh-hosts" type="button" aria-label="刷新服务器列表">刷新</button></div>
+          <div class="host-options" id="host-options" role="menu" aria-label="选择服务器"></div>
+          <p class="hosts-status" id="hosts-status" role="status" aria-live="polite">正在读取服务器列表…</p>
+          <p class="host-menu-hint">选择后切换或新建终端</p>
+        </div>
+      </div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="切换到浅色模式" aria-pressed="false"><span id="theme-icon" aria-hidden="true">☀</span><span id="theme-label">浅色模式</span></button>
+      <span class="status" id="status" data-state="connecting"><i></i><span id="status-text">正在连接</span></span>
+    </div>
+  </header>
+  <main>
+    <section class="heading"><div><h1>服务器终端<span class="title-dot">.</span></h1><p>连接本机或已配置的服务器。</p></div><button class="primary" id="new-session"><span>+</span> 新建终端</button></section>
+    <section class="terminal-card" aria-label="交互式终端">
+      <div class="terminal-layout">
+        <aside class="session-sidebar" aria-label="终端会话">
+          <div class="sidebar-heading"><span>终端会话</span><span id="session-count">0</span></div>
+          <div id="session-list" role="tablist" aria-label="选择终端" aria-orientation="vertical"></div>
+          <p class="sidebar-empty" id="sidebar-empty">暂无终端</p>
+        </aside>
+        <div class="terminal-main">
+          <div class="toolbar"><div class="tab"><span class="tab-symbol">&gt;_</span><span id="tab-title">bash</span><span class="tab-index" id="tab-index">01</span></div><div class="actions"><button id="copy" title="复制选中的文本">复制</button><button id="paste" title="粘贴剪贴板内容">粘贴</button><span class="divider"></span><button id="font-down" aria-label="缩小字体">A−</button><button id="font-up" aria-label="放大字体">A+</button><span class="divider"></span><button id="clear" title="清空终端显示">清屏</button><button id="interrupt" title="中断当前命令（Ctrl+C）">中断</button></div></div>
+          <div id="terminal" aria-label="服务器命令行"><div class="terminal-empty" id="terminal-empty"><span class="empty-mark">&gt;_</span><p>选择服务器，点击“新建终端”开始工作</p></div></div>
+          <div class="terminal-footer"><span><i class="small-dot"></i><span id="identity">正在获取本机信息…</span></span><span class="terminal-size" id="terminal-size">— × —</span></div>
+        </div>
+      </div>
+    </section>
+    <footer class="bottom"><div class="machine-meta"><span id="directory">/home/vlab</span><span class="meta-divider">/</span><span id="shell">bash</span></div><div class="shortcuts"><span><kbd>Ctrl</kbd> + <kbd>C</kbd> 中断</span><span><kbd>↑</kbd> 历史命令</span><span>关闭页面会结束所有终端</span></div></footer>
+    <div class="notice" id="notice" role="status" aria-live="polite"></div>
+  </main>
+</body>
+</html>
