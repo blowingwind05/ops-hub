@@ -26,6 +26,7 @@ function setFileBusy(busy) {
   fileState.busy = busy;
   for (const control of byId('files-local').querySelectorAll('button')) control.disabled = busy;
   byId('files-path').disabled = busy;
+  byId('file-trash-empty').disabled = busy || !byId('file-trash-list').children.length;
   if (!busy) {
     byId('files-up').disabled = !fileState.path || fileState.path === fileState.parent;
     renderFiles();
@@ -278,15 +279,23 @@ async function saveFileEditor(event) {
   finally { byId('file-editor-save').disabled = false; byId('file-editor-content').readOnly = false; }
 }
 
+function formatUploadTime(seconds) {
+  const remaining = Math.max(0, Math.ceil(seconds));
+  if (remaining < 60) return remaining + ' 秒';
+  if (remaining < 3600) return Math.floor(remaining / 60) + ' 分 ' + remaining % 60 + ' 秒';
+  return Math.floor(remaining / 3600) + ' 小时 ' + Math.floor(remaining % 3600 / 60) + ' 分';
+}
+
 function showUploadProgress(file, index, total, completed) {
   const panel = byId('files-upload-progress');
-  panel.hidden = false;
   panel.dataset.state = 'uploading';
   byId('files-upload-name').textContent = file.name;
   byId('files-upload-name').title = file.name;
   byId('files-upload-percent').textContent = '0%';
   byId('files-upload-bar').value = 0;
   byId('files-upload-size').textContent = formatBytes(file.size);
+  byId('files-upload-speed').textContent = '—';
+  byId('files-upload-eta').textContent = '估算中…';
   byId('files-upload-status').textContent = '正在上传 · 第 ' + (index + 1) + '/' + total + ' 个 · ' + completed + ' 个已完成';
 }
 
@@ -295,7 +304,24 @@ function uploadWithProgress(file, path, index, total, completed) {
     const request = new XMLHttpRequest();
     request.open('POST', '/api/files/upload?' + new URLSearchParams({ path }));
     request.setRequestHeader('X-Ops-Hub-Request', '1');
+    let loaded = 0, transferTotal = null;
+    const samples = [{ time: performance.now(), loaded: 0 }];
+    const updateMetrics = () => {
+      const now = performance.now();
+      samples.push({ time: now, loaded });
+      // Use a recent window so the estimate responds to changes and stalled transfers.
+      while (samples.length > 2 && samples[1].time <= now - 3000) samples.shift();
+      const elapsed = (now - samples[0].time) / 1000;
+      const speed = elapsed > 0 ? (loaded - samples[0].loaded) / elapsed : 0;
+      byId('files-upload-speed').textContent = formatBytes(Math.round(speed)) + '/s';
+      byId('files-upload-eta').textContent = transferTotal !== null && loaded >= transferTotal ? '0 秒'
+        : transferTotal !== null && speed > 0 ? formatUploadTime((transferTotal - loaded) / speed) : '估算中…';
+    };
+    const timer = setInterval(updateMetrics, 250);
     request.upload.onprogress = event => {
+      loaded = event.loaded;
+      transferTotal = event.lengthComputable && event.total ? event.total : null;
+      updateMetrics();
       if (!event.lengthComputable || !event.total) {
         byId('files-upload-bar').removeAttribute('value');
         byId('files-upload-percent').textContent = '上传中';
@@ -306,27 +332,33 @@ function uploadWithProgress(file, path, index, total, completed) {
       byId('files-upload-percent').textContent = Math.floor(percent) + '%';
     };
     request.upload.onload = () => {
+      clearInterval(timer);
       byId('files-upload-bar').value = 100;
       byId('files-upload-percent').textContent = '100%';
+      byId('files-upload-speed').textContent = '—';
+      byId('files-upload-eta').textContent = '等待保存';
       byId('files-upload-status').textContent = '传输完成，正在保存 · 第 ' + (index + 1) + '/' + total + ' 个 · ' + completed + ' 个已完成';
     };
     request.onload = () => {
+      clearInterval(timer);
       let data;
       try { data = JSON.parse(request.responseText); } catch (_) { data = null; }
       if (request.status >= 200 && request.status < 300) resolve(data);
       else reject(new Error(data?.error || request.responseText || '文件上传失败'));
     };
-    request.onerror = () => reject(new Error('上传失败，网络连接中断'));
-    request.onabort = () => reject(new Error('上传已取消'));
+    request.onerror = () => { clearInterval(timer); reject(new Error('上传失败，网络连接中断')); };
+    request.onabort = () => { clearInterval(timer); reject(new Error('上传已取消')); };
     const body = new FormData();
     body.append('file', file);
-    request.send(body);
+    try { request.send(body); }
+    catch (error) { clearInterval(timer); reject(error); }
   });
 }
 
 async function uploadFiles(files) {
   if (!files.length || fileState.busy || selectedHost) return;
   const path = fileState.path;
+  byId('files-upload-progress').hidden = false;
   setFileBusy(true);
   fileError();
   let completed = 0;
@@ -346,14 +378,37 @@ async function uploadFiles(files) {
     byId('files-upload-status').textContent = errors.length
       ? '上传结束 · ' + completed + ' 个成功，' + errors.length + ' 个失败'
       : '上传完成 · ' + completed + '/' + files.length + ' 个文件';
+    byId('files-upload-speed').textContent = '—';
+    byId('files-upload-eta').textContent = errors.length ? '—' : '0 秒';
     await loadFiles();
     if (completed) notify(completed + ' 个文件上传完成');
     if (errors.length) fileError(errors.join('；'));
   } finally { setFileBusy(false); byId('files-upload-input').value = ''; }
 }
 
+async function performTrashAction(payload, success) {
+  if (fileState.busy) return;
+  setFileBusy(true);
+  for (const button of byId('file-trash-list').querySelectorAll('button')) button.disabled = true;
+  byId('file-trash-status').textContent = payload.action === 'empty_trash' ? '正在清空回收站…'
+    : payload.action === 'purge' ? '正在彻底删除…' : '正在恢复…';
+  try {
+    const result = await fileAction(payload);
+    notify(payload.action === 'empty_trash' ? '已彻底删除 ' + result.deleted + ' 条记录' : success);
+    if (payload.action === 'restore') await loadFiles();
+    await loadTrash();
+    if (result.errors?.length) byId('file-trash-status').textContent = '已删除 ' + result.deleted + ' 条，'
+      + result.errors.length + ' 条删除失败。请检查访问权限和回收站路径后重试。';
+  } catch (error) { byId('file-trash-status').textContent = error.message; }
+  finally {
+    setFileBusy(false);
+    for (const button of byId('file-trash-list').querySelectorAll('button')) button.disabled = false;
+  }
+}
+
 async function loadTrash() {
   byId('file-trash-status').textContent = '正在读取回收站…';
+  byId('file-trash-empty').disabled = true;
   try {
     const data = await fileRequest('/api/files/trash');
     const fragment = document.createDocumentFragment();
@@ -361,32 +416,54 @@ async function loadTrash() {
       const row = document.createElement('div');
       row.className = 'trash-row';
       const labels = document.createElement('div');
+      labels.className = 'trash-labels';
       const path = document.createElement('strong');
       path.textContent = entry.path;
       const detail = document.createElement('span');
       detail.textContent = (entry.operation === 'edit' ? '编辑备份' : '已删除') + ' · ' + new Date(entry.time * 1000).toLocaleString('zh-CN', { hour12: false });
       labels.append(path, detail);
-      row.append(labels, fileButton('恢复', async () => {
+      const actions = document.createElement('div');
+      actions.className = 'trash-actions';
+      actions.append(fileButton('恢复', async () => {
+        if (fileState.busy) return;
         const destination = await askFileOperation('恢复文件', '恢复不会覆盖已有文件。可修改为其他绝对路径。', entry.path, true, '恢复');
         if (destination === null) return;
-        setFileBusy(true);
-        for (const button of byId('file-trash-list').querySelectorAll('button')) button.disabled = true;
-        try {
-          await fileAction({ action: 'restore', id: entry.id, destination });
-          notify('文件已恢复');
-          await loadFiles();
-          await loadTrash();
-        } catch (error) { byId('file-trash-status').textContent = error.message; }
-        finally {
-          setFileBusy(false);
-          for (const button of byId('file-trash-list').querySelectorAll('button')) button.disabled = false;
-        }
-      }));
+        await performTrashAction({ action: 'restore', id: entry.id, destination }, '文件已恢复');
+      }), fileButton('彻底删除', async () => {
+        if (fileState.busy) return;
+        const confirmed = await askFileOperation('彻底删除', entry.path + '\n\n将永久删除这条记录及其文件内容，文件夹内的所有内容也会删除。删除后无法通过回收站恢复。'
+          + (entry.operation === 'edit' ? '\n此操作仅删除编辑备份，当前文件不受影响。' : ''), '', false, '彻底删除');
+        if (!confirmed) return;
+        await performTrashAction({ action: 'purge', id: entry.id }, '已彻底删除');
+      }, 'trash-delete'));
+      row.append(labels, actions);
       fragment.append(row);
     }
     byId('file-trash-list').replaceChildren(fragment);
     byId('file-trash-status').textContent = data.entries.length ? data.entries.length + ' 条可恢复记录' : '回收站为空';
   } catch (error) { byId('file-trash-status').textContent = error.message; }
+  finally { byId('file-trash-empty').disabled = fileState.busy || !byId('file-trash-list').children.length; }
+}
+
+function updateFileSearchButton() {
+  const button = byId('files-search-toggle'), input = byId('files-search');
+  const open = !input.hidden;
+  button.parentElement.classList.toggle('is-open', open);
+  button.setAttribute('aria-expanded', String(open));
+  button.setAttribute('aria-label', open ? '收起搜索' : '搜索');
+  button.dataset.filtered = String(Boolean(input.value));
+  button.title = open ? '收起搜索' : input.value ? '搜索：' + input.value : '搜索';
+}
+
+function toggleFileSearch(open, { clear = true, focus = true } = {}) {
+  const button = byId('files-search-toggle'), input = byId('files-search');
+  input.hidden = !open;
+  if (!open && clear) {
+    input.value = '';
+    renderFiles();
+  }
+  updateFileSearchButton();
+  if (focus) (open ? input : button).focus();
 }
 
 byId('view-terminal').onclick = () => setWorkspaceView('terminal');
@@ -397,11 +474,23 @@ byId('files-up').onclick = () => loadFiles(fileState.parent);
 byId('files-home').onclick = () => loadFiles(machineInfo?.directory || '');
 byId('files-refresh').onclick = () => loadFiles();
 byId('files-hidden').onchange = renderFiles;
-byId('files-search').oninput = renderFiles;
+byId('files-search').oninput = () => { renderFiles(); updateFileSearchButton(); };
+byId('files-search-toggle').onclick = () => toggleFileSearch(byId('files-search').hidden);
+byId('files-search').onblur = () => {
+  // Let the clicked control handle its action before collapsing the input.
+  requestAnimationFrame(() => {
+    const input = byId('files-search');
+    if (!input.hidden && document.activeElement !== input) toggleFileSearch(false, { clear: false, focus: false });
+  });
+};
+byId('files-search').onkeydown = event => {
+  if (event.key === 'Escape') { event.preventDefault(); toggleFileSearch(false); }
+};
 byId('files-mkdir').onclick = () => createFileItem(true);
 byId('files-create').onclick = () => createFileItem(false);
 byId('files-upload').onclick = () => { if (fileState.loaded) byId('files-upload-input').click(); };
 byId('files-upload-input').onchange = event => uploadFiles([...event.target.files]);
+byId('files-upload-close').onclick = () => { byId('files-upload-progress').hidden = true; };
 byId('file-operation-form').onsubmit = event => { event.preventDefault(); finishFileOperation(byId('file-operation-name').hidden ? true : byId('file-operation-name').value); };
 byId('file-operation-cancel').onclick = () => finishFileOperation();
 byId('file-operation').oncancel = event => { event.preventDefault(); finishFileOperation(); };
@@ -414,6 +503,11 @@ byId('file-editor-content').onkeydown = event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); byId('file-editor-form').requestSubmit(); }
 };
 byId('files-trash').onclick = () => { byId('file-trash').showModal(); loadTrash(); };
+byId('file-trash-empty').onclick = async () => {
+  if (fileState.busy || byId('file-trash-empty').disabled) return;
+  const confirmed = await askFileOperation('清空回收站', '将永久删除回收站中的所有文件、文件夹和编辑备份。\n删除后无法通过回收站恢复，当前文件和符号链接指向的目标不受影响。', '', false, '清空回收站');
+  if (confirmed) await performTrashAction({ action: 'empty_trash' });
+};
 byId('file-trash-close').onclick = () => { if (!fileState.busy) byId('file-trash').close(); };
 byId('file-trash').oncancel = event => { if (fileState.busy) event.preventDefault(); };
 window.addEventListener('beforeunload', event => { if (editorDirty()) { event.preventDefault(); event.returnValue = ''; } });

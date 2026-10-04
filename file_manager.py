@@ -1,4 +1,4 @@
-"""Local file management with recoverable writes and deletions."""
+"""Local file management with backups, trash, and explicit permanent deletion."""
 
 import asyncio
 import ctypes
@@ -244,16 +244,61 @@ def write_text(path, text, home, expected=None, create=False):
                 temporary.unlink(missing_ok=True)
 
 
+def trash_container(identifier, home):
+    if not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier):
+        raise ValueError('无效的回收站记录。')
+    container = Path(home) / TRASH_NAME / identifier
+    if container.is_symlink() or container.resolve() != container:
+        raise ValueError('回收站路径包含符号链接。')
+    return container
+
+
+def purge_record(identifier, home):
+    container = trash_container(identifier, home)
+    # Delete the data first, preserving the record if the deletion fails.
+    data = container / 'data'
+    try:
+        metadata = data.lstat()
+    except FileNotFoundError:
+        metadata = None
+    if metadata is not None:
+        if stat.S_ISDIR(metadata.st_mode):
+            shutil.rmtree(data)
+        else:
+            data.unlink()
+    # rmtree never follows archived symlinks, including links inside folders.
+    shutil.rmtree(container)
+
+
+def empty_trash(home):
+    trash = Path(home) / TRASH_NAME
+    if trash.resolve() != trash:
+        raise ValueError('回收站路径包含符号链接。')
+    deleted, errors = 0, []
+    if trash.exists():
+        # Use actual container names, not identifiers supplied by record.json.
+        for container in list(trash.iterdir()):
+            if not re.fullmatch(r'[a-f0-9]{32}', container.name):
+                continue
+            try:
+                purge_record(container.name, home)
+                deleted += 1
+            except (OSError, ValueError):
+                errors.append({'id': container.name, 'error': '无法删除此记录，请检查访问权限和回收站路径后重试。'})
+    return {'deleted': deleted, 'errors': errors}
+
+
 def mutate(payload, home):
     action = payload['action']
     with WRITE_LOCK:
-        if action == 'restore':
+        if action == 'empty_trash':
+            return empty_trash(home)
+        if action in ('restore', 'purge'):
             identifier = payload['id']
-            if not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier):
-                raise ValueError('无效的回收站记录。')
-            container = Path(home) / TRASH_NAME / identifier
-            if container.resolve() != container:
-                raise ValueError('回收站路径包含符号链接。')
+            container = trash_container(identifier, home)
+            if action == 'purge':
+                purge_record(identifier, home)
+                return {'id': identifier}
             record = json.loads((container / 'record.json').read_text())
             target = path_value(payload.get('destination') or record['path'], home)
             rename_new(container / 'data', target)

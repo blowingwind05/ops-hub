@@ -113,6 +113,149 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
         await self.action('restore', id=record['id'])
         self.assertTrue(link.is_symlink())
 
+    async def test_purge_file_and_edit_backup_leaves_current_file_and_other_records(self):
+        path = self.work / 'settings.txt'
+        path.write_text('old settings')
+        await self.action('save', path=str(path), content='current settings',
+                          revision=file_manager.revision(path.lstat()))
+        response = await self.client.get('/api/files/trash')
+        backup = (await response.json())['entries'][0]
+        deleted = self.work / 'deleted.txt'
+        deleted.write_text('discard this')
+        record = await self.action('delete', path=str(deleted),
+                                   revision=file_manager.revision(deleted.lstat()))
+        trash = self.home / file_manager.TRASH_NAME
+        await self.action('purge', id=backup['id'])
+        self.assertEqual(path.read_text(), 'current settings')
+        self.assertFalse((trash / backup['id']).exists())
+        self.assertEqual((trash / record['id'] / 'data').read_text(), 'discard this')
+        await self.action('restore', status=404, id=backup['id'])
+        await self.action('purge', id=record['id'])
+        self.assertFalse((trash / record['id']).exists())
+        response = await self.client.get('/api/files/trash')
+        self.assertEqual((await response.json())['entries'], [])
+        await self.action('purge', status=404, id=record['id'])
+
+    async def test_purge_nonempty_directory_and_symlinks_preserves_targets(self):
+        target = self.work / 'keep'
+        target.mkdir()
+        (target / 'keep.txt').write_text('keep me')
+        folder = self.work / 'discard'
+        (folder / 'nested').mkdir(parents=True)
+        (folder / 'nested' / 'remove.txt').write_text('remove me')
+        (folder / 'outside-link').symlink_to(target, target_is_directory=True)
+        (folder / 'broken-link').symlink_to(self.work / 'missing')
+        record = await self.action('delete', path=str(folder),
+                                   revision=file_manager.revision(folder.lstat()))
+        await self.action('purge', id=record['id'])
+        self.assertFalse((self.home / file_manager.TRASH_NAME / record['id']).exists())
+        self.assertEqual((target / 'keep.txt').read_text(), 'keep me')
+        for name, destination in [('link', target), ('broken', self.work / 'missing')]:
+            link = self.work / name
+            link.symlink_to(destination)
+            record = await self.action('delete', path=str(link),
+                                       revision=file_manager.revision(link.lstat()))
+            await self.action('purge', id=record['id'])
+            self.assertFalse((self.home / file_manager.TRASH_NAME / record['id']).exists())
+        self.assertEqual((target / 'keep.txt').read_text(), 'keep me')
+
+    async def test_failed_purge_keeps_record_for_retry(self):
+        folder = self.work / 'folder'
+        folder.mkdir()
+        (folder / 'keep.txt').write_text('recoverable')
+        record = await self.action('delete', path=str(folder),
+                                   revision=file_manager.revision(folder.lstat()))
+        container = self.home / file_manager.TRASH_NAME / record['id']
+        data = container / 'data'
+        data.chmod(0o000)
+        try:
+            await self.action('purge', status=403, id=record['id'])
+            response = await self.client.get('/api/files/trash')
+            self.assertEqual((await response.json())['entries'][0]['id'], record['id'])
+        finally:
+            data.chmod(0o755)
+        self.assertEqual((data / 'keep.txt').read_text(), 'recoverable')
+        await self.action('purge', id=record['id'])
+        self.assertFalse(container.exists())
+
+    async def test_empty_trash_clears_files_folders_and_backups_preserving_live_files(self):
+        self.assertEqual(await self.action('empty_trash'), {'deleted': 0, 'errors': []})
+        current = self.work / 'current.txt'
+        current.write_text('old')
+        await self.action('save', path=str(current), content='current',
+                          revision=file_manager.revision(current.lstat()))
+        folder = self.work / 'folder'
+        folder.mkdir()
+        (folder / 'remove.txt').write_text('discard')
+        (folder / 'link').symlink_to(current)
+        await self.action('delete', path=str(folder), revision=file_manager.revision(folder.lstat()))
+        deleted = self.work / 'deleted.txt'
+        deleted.write_text('discard')
+        record = await self.action('delete', path=str(deleted), revision=file_manager.revision(deleted.lstat()))
+        trash = self.home / file_manager.TRASH_NAME
+        # The batch must select actual containers, even if a record's ID is corrupt.
+        (trash / record['id'] / 'record.json').write_text('{"id":"../work"}')
+        result = await self.action('empty_trash')
+        self.assertEqual(result, {'deleted': 3, 'errors': []})
+        self.assertEqual(list(trash.iterdir()), [])
+        self.assertEqual(current.read_text(), 'current')
+        self.assertEqual(await self.action('empty_trash'), {'deleted': 0, 'errors': []})
+
+    async def test_empty_trash_reports_failures_and_can_retry_without_following_links(self):
+        blocked = self.work / 'blocked'
+        blocked.mkdir()
+        (blocked / 'keep.txt').write_text('retry me')
+        record = await self.action('delete', path=str(blocked), revision=file_manager.revision(blocked.lstat()))
+        removable = self.work / 'removable'
+        removable.write_text('discard')
+        other = await self.action('delete', path=str(removable), revision=file_manager.revision(removable.lstat()))
+        trash = self.home / file_manager.TRASH_NAME
+        redirected = trash / ('a' * 32)
+        redirected.symlink_to(self.work, target_is_directory=True)
+        data = trash / record['id'] / 'data'
+        data.chmod(0o000)
+        try:
+            result = await self.action('empty_trash')
+            self.assertEqual(result['deleted'], 1)
+            self.assertEqual({entry['id'] for entry in result['errors']}, {record['id'], redirected.name})
+            self.assertFalse((trash / other['id']).exists())
+            self.assertTrue((trash / record['id'] / 'record.json').exists())
+            self.assertTrue(redirected.is_symlink())
+            self.assertTrue(self.work.is_dir())
+        finally:
+            data.chmod(0o755)
+            redirected.unlink()
+        self.assertEqual((data / 'keep.txt').read_text(), 'retry me')
+        self.assertEqual(await self.action('empty_trash'), {'deleted': 1, 'errors': []})
+        self.assertEqual(list(trash.iterdir()), [])
+
+    async def test_purge_rejects_invalid_ids_redirected_paths_and_foreign_requests(self):
+        for identifier in ['../work', str(self.work), '', 'g' * 32, 'a' * 33, None, []]:
+            await self.action('purge', status=400, id=identifier)
+        trash = self.home / file_manager.TRASH_NAME
+        trash.mkdir(parents=True)
+        identifier = 'a' * 32
+        (self.work / 'keep.txt').write_text('keep me')
+        (trash / identifier).symlink_to(self.work, target_is_directory=True)
+        await self.action('purge', status=400, id=identifier)
+        (trash / identifier).unlink()
+        trash.rmdir()
+        trash.symlink_to(self.work, target_is_directory=True)
+        await self.action('purge', status=400, id=identifier)
+        await self.action('empty_trash', status=400)
+        trash.unlink()
+        record = await self.action('delete', path=str(self.work / 'keep.txt'),
+                                   revision=file_manager.revision((self.work / 'keep.txt').lstat()))
+        for action in ('purge', 'empty_trash'):
+            for headers in [{}, {'Origin': 'http://evil.example', 'X-Ops-Hub-Request': '1'}]:
+                response = await self.client.post('/api/files/action', json={'action': action, 'id': record['id']}, headers=headers)
+                self.assertEqual(response.status, 403)
+            response = await self.client.post('/api/files/action?host=prod',
+                                             json={'action': action, 'id': record['id']}, headers=self.headers)
+            self.assertEqual(response.status, 400)
+        await self.action('restore', id=record['id'])
+        self.assertEqual((self.work / 'keep.txt').read_text(), 'keep me')
+
     async def test_upload_download_duplicates_and_size_cleanup(self):
         async def upload(content, name='上传.bin'):
             form = FormData(quote_fields=False)
