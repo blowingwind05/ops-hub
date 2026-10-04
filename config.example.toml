@@ -1,0 +1,13 @@
+# Copy to config.toml and adjust for your deployment.
+
+[server]
+listen = ["127.0.0.1"]
+port = 8088
+
+[access]
+allowed_hosts = ["localhost", "127.0.0.1"]
+allowed_clients = ["127.0.0.0/8", "::1/128"]
+
+[terminal]
+directory = "~"
+ssh_config = "~/.ssh/config"

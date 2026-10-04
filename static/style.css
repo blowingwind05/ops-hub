@@ -212,3 +212,114 @@ main {
   .heading p { display: none; }
   h1 { font-size: 22px; }
 }
+
+/* Terminal and file workspaces share the same header and available height. */
+[hidden] { display: none !important; }
+.heading-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+.app-layout { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.app-layout > main { width: auto; flex: 1; min-width: 0; margin: 0; padding-left: clamp(18px, 3vw, 48px); padding-right: clamp(18px, 3vw, 48px); }
+.workspace-sidebar { width: 64px; flex-shrink: 0; background: var(--topbar); border-right: 1px solid var(--line); }
+.workspace-nav { display: flex; flex-direction: column; padding: 8px 0; }
+.workspace-nav button { display: flex; position: relative; flex-direction: column; align-items: center; justify-content: center; gap: 6px; height: 62px; background: transparent; color: var(--muted); font-size: 10px; }
+.workspace-nav button svg { width: 23px; height: 23px; }
+.workspace-nav button[aria-pressed="true"] { background: var(--selection); color: var(--text); }
+.workspace-nav button[aria-pressed="true"]::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
+.workspace-nav button:hover { color: var(--text); background: var(--hover); }
+.workspace-nav button:focus-visible { outline-offset: -4px; }
+.files-card { flex: 1; min-height: 0; display: flex; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); overflow: hidden; }
+.files-local { display: flex; flex-direction: column; min-height: 0; min-width: 0; width: 100%; }
+.files-toolbar { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: var(--toolbar); border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.files-toolbar button, .files-actions button { color: var(--text); background: var(--control); border: 1px solid var(--line); border-radius: 3px; padding: 7px 10px; font-size: 11px; white-space: nowrap; }
+.files-toolbar button:hover, .files-actions button:hover { border-color: var(--accent); }
+#files-path-form { display: flex; gap: 8px; flex: 1; min-width: 0; }
+.files-card input[type="text"], .files-card input[type="search"], #file-operation-name { min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 3px; color: var(--text); background: var(--terminal); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+#files-path { flex: 1; width: 100%; }
+.files-card input:focus, #file-operation-name:focus, #file-editor-content:focus { outline: 1px solid var(--accent); outline-offset: 0; }
+.files-card input::placeholder { color: var(--muted); }
+.files-actions { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.file-create-actions, .files-filter { display: flex; gap: 8px; align-items: center; }
+.files-filter label { display: flex; align-items: center; white-space: nowrap; font-size: 11px; color: var(--muted); gap: 5px; }
+.files-filter input[type="checkbox"] { accent-color: var(--accent); }
+#files-search { width: 160px; }
+.files-error { border-bottom: 1px solid var(--line); color: var(--error); font-size: 12px; padding: 10px 14px; flex-shrink: 0; max-height: 100px; overflow: auto; overflow-wrap: anywhere; }
+.files-table-scroll { overflow: auto; flex: 1; min-height: 0; scrollbar-width: thin; scrollbar-color: var(--scrollbar) var(--panel); }
+.files-table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 12px; }
+.files-table th { color: var(--muted); font-weight: 500; font-size: 11px; text-align: left; position: sticky; top: 0; z-index: 1; background: var(--toolbar); }
+.files-table td, .files-table th { border-bottom: 1px solid var(--line); padding: 9px 14px; }
+.files-table th:first-child { width: auto; }
+.files-table th:nth-child(2) { width: 90px; }
+.files-table th:nth-child(3) { width: 172px; }
+.files-table th:nth-child(4) { width: 120px; }
+.files-table th:nth-child(5) { width: 225px; }
+.files-table tbody tr:hover { background: var(--hover); }
+.files-table tbody tr:focus-within { background: var(--hover); }
+.file-name { display: flex; align-items: center; gap: 10px; max-width: 100%; background: transparent; color: var(--text); font-size: 12px; text-align: left; word-break: break-all; padding: 2px 0; }
+.file-icon { width: 18px; height: 18px; flex-shrink: 0; color: var(--muted); }
+.folder-icon { color: var(--accent-text); }
+.file-size, .file-mode { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+.file-modified { color: var(--muted); font-size: 11px; }
+.file-row-actions button, .file-download { background: transparent; color: var(--muted); border-radius: 3px; padding: 5px 7px; font-size: 11px; text-decoration: none; display: inline-block; }
+.file-row-actions button:hover, .file-download:hover { background: var(--selection); color: var(--text); }
+.file-row-actions .file-delete:hover { color: var(--error); }
+.file-row-actions > span { color: var(--muted); font-size: 11px; }
+.files-empty { text-align: center; padding: 40px 16px; color: var(--muted); font-size: 12px; }
+.files-footer { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.files-remote { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; gap: 12px; }
+.files-remote h2 { font-size: 18px; font-weight: 500; margin: 0; }
+.files-remote p { font-size: 12px; color: var(--muted); margin: 0 0 8px; overflow-wrap: anywhere; }
+.file-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.file-dialog-heading h2 { margin: 0; }
+.file-dialog-heading > button { background: transparent; color: var(--muted); padding: 0; width: 30px; height: 30px; font-size: 24px; }
+#file-editor { width: min(900px, calc(100vw - 32px)); max-width: none; height: min(720px, calc(100dvh - 40px)); padding: 22px; border-radius: 6px; }
+#file-editor-form { height: 100%; display: flex; flex-direction: column; }
+#file-editor-path { margin: 10px 0; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; flex-shrink: 0; max-height: 48px; overflow: auto; }
+#file-editor-content { resize: none; width: 100%; flex: 1; min-height: 60px; padding: 12px; border: 1px solid var(--line); border-radius: 3px; color: var(--text); background: var(--terminal); font: 13px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 4; white-space: pre; }
+#file-editor-status { font-size: 11px; margin: 8px 0 0; line-height: 1.5; max-height: 50px; overflow: auto; flex-shrink: 0; }
+#file-editor .dialog-actions { margin-top: 12px; }
+#file-operation { border-radius: 6px; }
+#file-operation-name { width: 100%; margin-top: 8px; }
+#file-operation-label { font-size: 12px; }
+#file-operation-description { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow: auto; }
+.operation-error { color: var(--error); }
+#file-trash { width: min(720px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 40px); padding: 22px; border-radius: 6px; }
+.trash-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--line); padding: 12px 0; }
+.trash-row > div { display: flex; flex-direction: column; min-width: 0; gap: 6px; }
+.trash-row strong { color: var(--text); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.trash-row span { color: var(--muted); font-size: 11px; }
+.trash-row button { background: var(--control); color: var(--text); padding: 7px 12px; border: 1px solid var(--line); border-radius: 3px; font-size: 11px; flex-shrink: 0; }
+@media (max-width: 1000px) {
+  .files-table th:nth-child(4), .files-table td.file-mode { display: none; }
+  .files-table th:nth-child(3) { width: 150px; }
+  .files-table th:nth-child(5) { width: 212px; }
+}
+@media (max-width: 700px) {
+  .heading { gap: 12px; align-items: flex-start; }
+  .heading-actions { flex-direction: column; align-items: flex-end; gap: 8px; }
+  .workspace-sidebar { width: 46px; }
+  .workspace-nav button { height: 54px; font-size: 9px; }
+  .workspace-nav button svg { width: 20px; height: 20px; }
+  .app-layout > main { padding-left: 10px; padding-right: 10px; }
+  .files-toolbar { padding: 10px; gap: 6px; flex-wrap: wrap; }
+  #files-path-form { order: 1; flex-basis: 100%; }
+  .files-toolbar button, .files-actions button { padding: 6px 8px; font-size: 10px; }
+  .files-actions { padding: 8px 10px; gap: 8px; }
+  .file-create-actions { gap: 5px; flex-wrap: wrap; }
+  .files-filter { width: 100%; justify-content: space-between; }
+  #files-search { width: min(170px, 50%); }
+  .files-table th:nth-child(3), .files-table td.file-modified { display: none; }
+  .files-table th:nth-child(2) { width: 65px; }
+  .files-table th:nth-child(5) { width: 100px; }
+  .files-table td, .files-table th { padding: 8px; }
+  .file-name { font-size: 11px; gap: 6px; }
+  .file-icon { width: 16px; height: 16px; }
+  .file-row-actions button, .file-download { font-size: 10px; padding: 4px; }
+  .files-footer { flex-direction: column; gap: 3px; padding: 8px 10px; font-size: 9px; }
+  #file-editor { padding: 14px; }
+  #file-trash { padding: 16px; }
+}
+@media (max-height: 450px) {
+  .heading-actions { flex-direction: row; gap: 8px; }
+  .files-toolbar { padding-top: 6px; padding-bottom: 6px; }
+  .files-actions { padding-top: 6px; padding-bottom: 6px; }
+  .files-footer { padding-top: 6px; padding-bottom: 6px; }
+}

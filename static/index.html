@@ -12,6 +12,7 @@
   <script defer src="/static/vendor/xterm.js"></script>
   <script defer src="/static/vendor/addon-fit.js"></script>
   <script defer src="/static/app.js"></script>
+  <script defer src="/static/files.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -30,9 +31,11 @@
       <span class="status" id="status" data-state="connecting"><i></i><span id="status-text">正在连接</span></span>
     </div>
   </header>
-  <main>
-    <section class="heading"><div><h1>服务器终端<span class="title-dot">.</span></h1><p>连接本机或已配置的服务器。</p></div><button class="primary" id="new-session"><span>+</span> 新建终端</button></section>
-    <section class="terminal-card" aria-label="交互式终端">
+  <div class="app-layout">
+    <aside class="workspace-sidebar" aria-label="功能导航"><nav class="workspace-nav" aria-label="工作区"><button id="view-terminal" type="button" aria-pressed="true" title="终端"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="/static/vendor/lucide/file-icons.svg#terminal"/></svg><span>终端</span></button><button id="view-files" type="button" aria-pressed="false" title="文件管理"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="/static/vendor/lucide/file-icons.svg#folder"/></svg><span>文件</span></button></nav></aside>
+    <main>
+    <section class="heading"><div><h1><span id="workspace-title">服务器终端</span><span class="title-dot">.</span></h1><p id="workspace-description">连接本机或已配置的服务器。</p></div><div class="heading-actions"><button class="primary" id="new-session"><span>+</span> 新建终端</button></div></section>
+    <section class="terminal-card" id="terminal-workspace" aria-label="交互式终端">
       <div class="terminal-layout">
         <aside class="session-sidebar" aria-label="终端会话">
           <div class="sidebar-heading"><span>终端会话</span><span id="session-count">0</span></div>
@@ -46,8 +49,33 @@
         </div>
       </div>
     </section>
-    <footer class="bottom"><div class="machine-meta"><span id="directory">/home/vlab</span><span class="meta-divider">/</span><span id="shell">bash</span></div><div class="shortcuts"><span><kbd>Ctrl</kbd> + <kbd>C</kbd> 中断</span><span><kbd>↑</kbd> 历史命令</span><span>关闭页面会结束所有终端</span></div></footer>
+    <section class="files-card" id="files-workspace" aria-label="文件管理" hidden>
+      <div class="files-local" id="files-local">
+        <div class="files-toolbar">
+          <button id="files-up" type="button" aria-label="上一级目录" title="上一级目录">↑</button>
+          <button id="files-home" type="button">主目录</button>
+          <form id="files-path-form"><input id="files-path" type="text" spellcheck="false" aria-label="目录路径" placeholder="输入绝对路径或 ~/ 路径"><button type="submit">前往</button></form>
+          <button id="files-refresh" type="button">刷新</button>
+        </div>
+        <div class="files-actions">
+          <div class="file-create-actions"><button id="files-upload" type="button">上传文件</button><button id="files-mkdir" type="button">新建文件夹</button><button id="files-create" type="button">新建文件</button><button id="files-trash" type="button">回收站</button></div>
+          <div class="files-filter"><label><input id="files-hidden" type="checkbox"> 隐藏文件</label><input id="files-search" type="search" aria-label="筛选文件名" placeholder="筛选文件名"></div>
+          <input id="files-upload-input" type="file" multiple hidden>
+        </div>
+        <div id="files-error" class="files-error" role="alert" hidden></div>
+        <div class="files-table-scroll"><table class="files-table"><thead><tr><th scope="col">名称</th><th scope="col">大小</th><th scope="col">修改时间</th><th scope="col">权限</th><th scope="col">操作</th></tr></thead><tbody id="files-list"></tbody></table><p id="files-empty" class="files-empty" role="status">正在读取目录…</p></div>
+        <div class="files-footer"><span id="files-summary" role="status" aria-live="polite">本机文件</span><span>上传 ≤ 256 MiB · 文本编辑 ≤ 2 MiB</span></div>
+      </div>
+      <div class="files-remote" id="files-remote" hidden><h2>远程文件管理尚未接入</h2><p id="files-remote-description"></p><button id="files-local-switch" class="primary" type="button">管理本机文件</button></div>
+    </section>
+    <footer class="bottom"><div class="machine-meta"><span id="directory">~</span><span class="meta-divider">/</span><span id="shell">bash</span></div><div class="shortcuts"><span><kbd>Ctrl</kbd> + <kbd>C</kbd> 中断</span><span><kbd>↑</kbd> 历史命令</span><span>关闭页面会结束所有终端</span></div></footer>
     <div class="notice" id="notice" role="status" aria-live="polite"></div>
   </main>
+  </div>
+  <dialog id="file-editor" aria-labelledby="file-editor-title">
+    <form id="file-editor-form"><div class="file-dialog-heading"><h2 id="file-editor-title">编辑文件</h2><button id="file-editor-close" type="button" aria-label="关闭编辑器">×</button></div><p id="file-editor-path"></p><textarea id="file-editor-content" aria-label="文件内容" spellcheck="false"></textarea><p id="file-editor-status" role="status" aria-live="polite"></p><div class="dialog-actions"><button id="file-editor-cancel" type="button">关闭</button><button id="file-editor-save" class="primary" type="submit">保存文件</button></div></form>
+  </dialog>
+  <dialog id="file-operation" aria-labelledby="file-operation-title"><form id="file-operation-form"><h2 id="file-operation-title"></h2><p id="file-operation-description"></p><label id="file-operation-label" for="file-operation-name">名称</label><input id="file-operation-name" type="text" autocomplete="off" spellcheck="false"><p id="file-operation-error" class="operation-error" role="alert"></p><div class="dialog-actions"><button id="file-operation-cancel" type="button">取消</button><button id="file-operation-confirm" class="primary" type="submit">确定</button></div></form></dialog>
+  <dialog id="file-trash" aria-labelledby="file-trash-title"><div class="file-dialog-heading"><h2 id="file-trash-title">回收站与编辑备份</h2><button id="file-trash-close" type="button" aria-label="关闭回收站">×</button></div><p>恢复到原路径；如果同名文件已存在，请指定新的恢复路径。</p><div id="file-trash-list"></div><p id="file-trash-status" role="status" aria-live="polite"></p></dialog>
 </body>
 </html>

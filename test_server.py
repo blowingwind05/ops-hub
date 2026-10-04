@@ -2,15 +2,17 @@
 
 import asyncio
 import json
+import ipaddress
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from aiohttp import WSMsgType
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 import server
+from configuration import Settings
 
 
 class HostDiscoveryTests(unittest.TestCase):
@@ -40,6 +42,64 @@ class HostDiscoveryTests(unittest.TestCase):
             config.write_text('Host "unfinished\n')
             with self.assertRaises(ValueError):
                 server.ssh_hosts(config)
+
+
+class NetworkAccessTests(unittest.IsolatedAsyncioTestCase):
+    async def check(self, peer, local_address, host, origin=None, path='/api/info'):
+        transport = Mock()
+        def extra(name, default=None):
+            return {'peername': (peer, 12345), 'sockname': (local_address, server.PORT)}.get(name, default)
+        transport.get_extra_info.side_effect = extra
+        headers = {'Host': host}
+        if origin is not None:
+            headers['Origin'] = origin
+        request = make_mocked_request('GET', path, headers=headers, transport=transport)
+        async def handler(request):
+            return True
+        return await server.access_control(request, handler)
+
+    async def test_configured_peers_listeners_hosts_and_origins(self):
+        ipv4 = '192.168.50.10'
+        ipv6 = 'fd00::10'
+        dns = 'ops.example.internal'
+        settings = Settings(
+            listen=('127.0.0.1', ipv4, ipv6), allowed_hosts=(ipv4, ipv6, dns),
+            allowed_clients=(ipaddress.ip_network('127.0.0.0/8'),
+                             ipaddress.ip_network('192.168.50.0/24'),
+                             ipaddress.ip_network('fd00::/64')))
+        with patch.object(server, 'CONFIG', settings):
+            for peer, local, host in [('192.168.50.20', ipv4, ipv4),
+                                      ('fd00::20', ipv6, '[' + ipv6 + ']'),
+                                      ('192.168.50.20', ipv4, dns)]:
+                authority = f'{host}:{server.PORT}'
+                self.assertTrue(await self.check(peer, local, authority, f'http://{authority}', '/ws'))
+            for peer, local, host, origin in [
+                ('192.168.51.20', ipv4, ipv4, None),
+                ('203.0.113.5', ipv4, ipv4, None),
+                ('192.168.50.20', '192.168.50.11', ipv4, None),
+                ('192.168.50.20', ipv4, 'evil.example', None),
+                ('192.168.50.20', ipv4, ipv4, 'https://evil.example'),
+            ]:
+                with self.assertRaises(server.web.HTTPForbidden):
+                    await self.check(peer, local, f'{host}:{server.PORT}', origin)
+            with self.assertRaises(server.web.HTTPForbidden):
+                await self.check('192.168.50.20', ipv4, f'{ipv4}:{server.PORT}', path='/ws')
+
+    async def test_default_stays_loopback_only(self):
+        with patch.object(server, 'CONFIG', Settings()):
+            self.assertTrue(await self.check('127.0.0.1', '127.0.0.1', f'localhost:{server.PORT}'))
+            with self.assertRaises(server.web.HTTPForbidden):
+                await self.check('192.168.50.20', '192.168.50.10', f'192.168.50.10:{server.PORT}')
+
+    async def test_wildcard_listener_still_checks_client_network(self):
+        settings = Settings(listen=('0.0.0.0',), allowed_hosts=('ops.example.internal',),
+                            allowed_clients=(ipaddress.ip_network('192.168.50.0/24'),))
+        with patch.object(server, 'CONFIG', settings):
+            self.assertTrue(await self.check('192.168.50.20', '192.168.50.10', f'ops.example.internal:{server.PORT}'))
+            with self.assertRaises(server.web.HTTPForbidden):
+                await self.check('192.168.51.20', '192.168.50.10', f'ops.example.internal:{server.PORT}')
+            with self.assertRaises(server.web.HTTPForbidden):
+                await self.check('192.168.50.20', 'fd00::10', f'ops.example.internal:{server.PORT}')
 
 
 class TerminalTests(unittest.IsolatedAsyncioTestCase):
@@ -124,7 +184,8 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
     async def test_remote_pty_arguments_password_input_resize_and_exit(self):
         async with self.client.ws_connect('/ws?host=prod', origin=self.origin) as ws:
             output = await self.read_until(ws, b'Password:')
-            self.assertIn(b'"argv": ["-tt", "--", "prod"]', output)
+            arguments = ['-F', str(self.config), '-tt', '--', 'prod']
+            self.assertIn(json.dumps(arguments).encode(), output)
             self.assertIn(b'"tty": true', output)
             await ws.send_json({'type': 'resize', 'cols': 120, 'rows': 40})
             await ws.send_json({'type': 'input', 'data': 'test-answer\n'})

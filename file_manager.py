@@ -1,0 +1,353 @@
+"""Local file management with recoverable writes and deletions."""
+
+import asyncio
+import ctypes
+import errno
+import functools
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import tempfile
+import threading
+import time
+import uuid
+from pathlib import Path
+from urllib.parse import quote
+
+from aiohttp import web
+
+TEXT_LIMIT = 2 * 1024 * 1024
+UPLOAD_LIMIT = 256 * 1024 * 1024
+ENTRY_LIMIT = 10000
+WRITE_LOCK = threading.RLock()
+TRASH_NAME = '.local/share/ops-hub/trash'
+
+
+def fail(status, message):
+    return web.json_response({'error': message}, status=status)
+
+
+def endpoint(handler):
+    @functools.wraps(handler)
+    async def wrapped(request):
+        if request.query.get('host'):
+            return fail(400, '目前仅支持本机文件管理，请切换到本机。')
+        if request.method not in ('GET', 'HEAD'):
+            if (request.headers.get('Origin') != f'http://{request.host}'
+                    or request.headers.get('X-Ops-Hub-Request') != '1'):
+                return fail(403, '文件操作必须从当前页面发起。')
+        try:
+            return await handler(request)
+        except web.HTTPException as error:
+            return fail(error.status, error.text)
+        except UnicodeError:
+            return fail(415, '仅支持编辑 UTF-8 文本文件。')
+        except (ValueError, TypeError, KeyError) as error:
+            return fail(400, str(error) or '无效的文件操作。')
+        except OSError as error:
+            messages = {
+                errno.ENOENT: (404, '文件或目录不存在，请刷新后重试。'),
+                errno.EACCES: (403, '没有权限访问此文件或目录。'),
+                errno.EPERM: (403, '没有权限执行此操作。'),
+                errno.EEXIST: (409, '同名文件或目录已存在，请使用其他名称。'),
+                errno.ENOTDIR: (400, '路径不是目录。'),
+                errno.EISDIR: (400, '请选择普通文件。'),
+                errno.ELOOP: (400, '不能直接编辑或下载符号链接，请打开其目标路径。'),
+                errno.ENOSPC: (507, '磁盘空间不足。'),
+                errno.EROFS: (403, '该文件系统只读。'),
+                errno.EXDEV: (400, '无法跨文件系统移入回收站，此操作未执行。'),
+                errno.ENAMETOOLONG: (400, '文件名或路径过长。'),
+            }
+            code, message = messages.get(error.errno, (400, '文件操作失败。'))
+            return fail(code, message)
+    return wrapped
+
+
+def path_value(value, home, follow=False):
+    if not isinstance(value, str) or '\x00' in value:
+        raise ValueError('无效的文件路径。')
+    value = value or str(home)
+    if value == '~' or value.startswith('~/'):
+        value = str(home) + value[1:]
+    if not os.path.isabs(value):
+        raise ValueError('请输入绝对路径，或使用 ~/ 开头的路径。')
+    path = Path(os.path.abspath(value))
+    # Resolve ancestors, but leave the final link intact for rename/trash.
+    checked = path.resolve() if follow else path.parent.resolve() / path.name
+    home = Path(home).resolve()
+    trash = home / TRASH_NAME
+    if checked == trash or checked.is_relative_to(trash):
+        raise web.HTTPForbidden(text='请通过回收站入口管理这些记录。')
+    return checked
+
+
+def name_value(value):
+    if (not isinstance(value, str) or not value or value in ('.', '..')
+            or '/' in value or '\x00' in value):
+        raise ValueError('请输入有效的文件名，名称不能包含 /。')
+    return value
+
+
+def revision(metadata):
+    fields = (metadata.st_dev, metadata.st_ino, metadata.st_mode,
+              metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+    return hashlib.sha256(repr(fields).encode()).hexdigest()
+
+
+def check_revision(path, expected):
+    if not isinstance(expected, str) or not expected:
+        raise ValueError('缺少文件版本，请刷新后重试。')
+    metadata = path.lstat()
+    if revision(metadata) != expected:
+        raise web.HTTPConflict(text='文件已被其他程序修改，请刷新或重新打开后再操作。')
+    return metadata
+
+
+def regular_bytes(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError('仅支持普通文件。')
+        data = stream.read(TEXT_LIMIT + 1) if metadata.st_size <= TEXT_LIMIT else b''
+        if metadata.st_size > TEXT_LIMIT or len(data) > TEXT_LIMIT:
+            raise web.HTTPRequestEntityTooLarge(max_size=TEXT_LIMIT, actual_size=max(metadata.st_size, len(data)),
+                                               text='文本编辑限制为 2 MiB，请下载后编辑。')
+        if revision(metadata) != revision(os.fstat(stream.fileno())):
+            raise web.HTTPConflict(text='读取时文件发生变化，请重新打开。')
+    return data, metadata
+
+
+def directory_listing(path, home):
+    path = path_value(str(path), home, follow=True)
+    entries = []
+    truncated = False
+    with os.scandir(path) as iterator:
+        for entry in iterator:
+            if len(entries) >= ENTRY_LIMIT:
+                truncated = True
+                break
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+                mode = metadata.st_mode
+                kind = 'directory' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode) else 'symlink' if stat.S_ISLNK(mode) else 'special'
+                try:
+                    path_value(entry.path, home)
+                    protected = False
+                except web.HTTPForbidden:
+                    protected = True
+                entries.append({'name': entry.name, 'path': str(path / entry.name),
+                                'kind': kind, 'target_directory': entry.is_dir() if kind == 'symlink' else False,
+                                'size': metadata.st_size, 'modified': metadata.st_mtime,
+                                'mode': stat.filemode(mode), 'revision': revision(metadata), 'protected': protected,
+                                'link_target': os.readlink(entry.path) if kind == 'symlink' else None})
+            except OSError:
+                entries.append({'name': entry.name, 'path': str(path / entry.name), 'kind': 'unavailable',
+                                'size': None, 'modified': None, 'mode': '—', 'revision': None, 'protected': True})
+    entries.sort(key=lambda item: (not (item['kind'] == 'directory' or item.get('target_directory')), item['name'].casefold()))
+    return {'path': str(path), 'parent': str(path.parent), 'root': '/', 'home': str(home),
+            'entries': entries, 'truncated': truncated, 'text_limit': TEXT_LIMIT, 'upload_limit': UPLOAD_LIMIT}
+
+
+def rename_new(source, destination):
+    libc = ctypes.CDLL(None, use_errno=True)
+    # RENAME_NOREPLACE: never replace an existing file, link, or directory.
+    if libc.renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+
+
+def archive(path, home, operation):
+    trash = Path(home) / TRASH_NAME
+    # Refuse a redirected trash directory or ancestor.
+    if trash.resolve() != trash:
+        raise ValueError('回收站路径包含符号链接，无法执行此操作。')
+    trash.mkdir(parents=True, exist_ok=True, mode=0o700)
+    identifier = uuid.uuid4().hex
+    container = trash / identifier
+    container.mkdir(mode=0o700)
+    record = {'id': identifier, 'path': str(path), 'name': path.name,
+              'time': time.time(), 'operation': operation}
+    try:
+        (container / 'record.json').write_text(json.dumps(record, ensure_ascii=True))
+        if operation == 'edit':
+            shutil.copy2(path, container / 'data', follow_symlinks=False)
+        else:
+            rename_new(path, container / 'data')
+    except BaseException:
+        # Only discard an incomplete record, never an archived user file.
+        if not (container / 'data').exists() and not (container / 'data').is_symlink():
+            (container / 'record.json').unlink(missing_ok=True)
+            container.rmdir()
+        raise
+    return record
+
+
+def trash_records(home):
+    trash = Path(home) / TRASH_NAME
+    if trash.resolve() != trash:
+        raise ValueError('回收站路径包含符号链接。')
+    records = []
+    if trash.exists():
+        for container in trash.iterdir():
+            if not container.is_dir() or container.is_symlink():
+                continue
+            try:
+                record = json.loads((container / 'record.json').read_text())
+                if (container / 'data').exists() or (container / 'data').is_symlink():
+                    records.append(record)
+            except (OSError, ValueError):
+                continue
+    records.sort(key=lambda item: item['time'], reverse=True)
+    return {'entries': records}
+
+
+def write_text(path, text, home, expected=None, create=False):
+    if not isinstance(text, str) or '\x00' in text:
+        raise ValueError('内容必须是文本，不能包含空字节。')
+    data = text.encode('utf-8')
+    if len(data) > TEXT_LIMIT:
+        raise web.HTTPRequestEntityTooLarge(max_size=TEXT_LIMIT, actual_size=len(data), text='文本编辑限制为 2 MiB。')
+    with WRITE_LOCK:
+        metadata = None if create else check_revision(path, expected)
+        if metadata is not None and not stat.S_ISREG(metadata.st_mode):
+            raise ValueError('仅支持编辑普通文件，请勿直接编辑符号链接。')
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.ops-hub-write-', delete=False) as stream:
+                temporary = Path(stream.name)
+                if metadata is not None:
+                    current = os.fstat(stream.fileno())
+                    if (current.st_uid, current.st_gid) != (metadata.st_uid, metadata.st_gid):
+                        os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+                stream.write(data)
+                stream.flush()
+                if metadata is not None:
+                    os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode))
+                    for attribute in os.listxattr(path, follow_symlinks=False):
+                        value = os.getxattr(path, attribute, follow_symlinks=False)
+                        os.setxattr(stream.fileno(), attribute, value)
+                os.fsync(stream.fileno())
+            if create:
+                os.link(temporary, path)
+            else:
+                check_revision(path, expected)
+                archive(path, home, 'edit')
+                check_revision(path, expected)
+                os.replace(temporary, path)
+            return {'path': str(path), 'revision': revision(path.lstat())}
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
+def mutate(payload, home):
+    action = payload['action']
+    with WRITE_LOCK:
+        if action == 'restore':
+            identifier = payload['id']
+            if not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier):
+                raise ValueError('无效的回收站记录。')
+            container = Path(home) / TRASH_NAME / identifier
+            if container.resolve() != container:
+                raise ValueError('回收站路径包含符号链接。')
+            record = json.loads((container / 'record.json').read_text())
+            target = path_value(payload.get('destination') or record['path'], home)
+            rename_new(container / 'data', target)
+            (container / 'record.json').unlink()
+            container.rmdir()
+            return {'path': str(target)}
+        path = path_value(payload.get('path', ''), home)
+        if action in ('mkdir', 'create'):
+            destination = path_value(str(path / name_value(payload['name'])), home)
+            if action == 'mkdir':
+                destination.mkdir(mode=0o755)
+                return {'path': str(destination)}
+            return write_text(destination, payload.get('content', ''), home, create=True)
+        if action == 'save':
+            return write_text(path, payload['content'], home, payload.get('revision'))
+        if action not in ('rename', 'delete'):
+            raise ValueError('不支持此文件操作。')
+        if path == Path('/') or path == Path(home) or (Path(home) / TRASH_NAME).is_relative_to(path):
+            raise ValueError('不能重命名或删除根目录、用户主目录和回收站所在目录。')
+        check_revision(path, payload.get('revision'))
+        if action == 'rename':
+            destination = path_value(str(path.parent / name_value(payload['name'])), home)
+            rename_new(path, destination)
+            return {'path': str(destination)}
+        return archive(path, home, 'delete')
+
+
+def register_file_routes(app, home):
+    @endpoint
+    async def listing(request):
+        path = path_value(request.query.get('path', ''), home, follow=True)
+        return web.json_response(await asyncio.to_thread(directory_listing, path, home))
+
+    @endpoint
+    async def text(request):
+        path = path_value(request.query.get('path', ''), home)
+        data, metadata = await asyncio.to_thread(regular_bytes, path)
+        if b'\x00' in data:
+            return fail(415, '该文件包含二进制内容，请使用下载功能。')
+        return web.json_response({'path': str(path), 'content': data.decode('utf-8'), 'revision': revision(metadata)})
+
+    @endpoint
+    async def download(request):
+        path = path_value(request.query.get('path', ''), home)
+        if not stat.S_ISREG((await asyncio.to_thread(path.lstat)).st_mode):
+            raise ValueError('仅支持下载普通文件，请打开符号链接的目标路径。')
+        return web.FileResponse(path, headers={
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': "attachment; filename*=UTF-8''" + quote(path.name, safe=''),
+        })
+
+    @endpoint
+    async def action(request):
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError('无效的文件操作。')
+        return web.json_response(await asyncio.to_thread(mutate, payload, home))
+
+    @endpoint
+    async def upload(request):
+        directory = path_value(request.query.get('path', ''), home, follow=True)
+        if not directory.is_dir():
+            raise ValueError('请选择上传目录。')
+        reader = await request.multipart()
+        part = await reader.next()
+        if part is None or part.name != 'file' or not part.filename:
+            raise ValueError('请选择要上传的文件。')
+        destination = path_value(str(directory / name_value(part.filename)), home)
+        temporary = None
+        total = 0
+        try:
+            descriptor, name = await asyncio.to_thread(tempfile.mkstemp, dir=directory, prefix='.ops-hub-upload-')
+            temporary = Path(name)
+            with os.fdopen(descriptor, 'wb') as stream:
+                while chunk := await part.read_chunk(65536):
+                    total += len(chunk)
+                    if total > UPLOAD_LIMIT:
+                        raise web.HTTPRequestEntityTooLarge(max_size=UPLOAD_LIMIT, actual_size=total, text='单个文件上传限制为 256 MiB。')
+                    await asyncio.to_thread(stream.write, chunk)
+                await asyncio.to_thread(stream.flush)
+                await asyncio.to_thread(os.fsync, stream.fileno())
+            await asyncio.to_thread(os.link, temporary, destination)
+            return web.json_response({'path': str(destination), 'size': total})
+        finally:
+            if temporary is not None:
+                await asyncio.to_thread(temporary.unlink, missing_ok=True)
+
+    @endpoint
+    async def trash(request):
+        return web.json_response(await asyncio.to_thread(trash_records, home))
+
+    app.router.add_get('/api/files', listing)
+    app.router.add_get('/api/files/text', text)
+    app.router.add_get('/api/files/download', download)
+    app.router.add_get('/api/files/trash', trash)
+    app.router.add_post('/api/files/action', action)
+    app.router.add_post('/api/files/upload', upload)

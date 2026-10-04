@@ -58,6 +58,7 @@ let nextSessionId = 1;
 let shellName = 'bash';
 let machineInfo = null;
 let selectedHost = '';
+let currentView = 'terminal';
 let configuredHosts = [];
 let sshAvailable = true;
 let currentTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
@@ -91,6 +92,10 @@ function updateControls() {
   byId('status').dataset.state = session?.state || 'disconnected';
   document.querySelector('.terminal-card').dataset.state = session?.state || 'disconnected';
   byId('status-text').textContent = session?.statusText || '无会话';
+  if (currentView === 'files') {
+    byId('status').dataset.state = selectedHost ? 'disconnected' : 'connected';
+    byId('status-text').textContent = selectedHost ? '未接入' : '本机文件';
+  }
   for (const id of ['copy', 'clear', 'font-up', 'font-down']) byId(id).disabled = !session;
   for (const id of ['paste', 'interrupt']) byId(id).disabled = session?.state !== 'connected';
   byId('tab-title').textContent = session ? session.program : '终端';
@@ -102,14 +107,16 @@ function updateControls() {
 }
 
 function updateMachineInfo() {
-  const host = activeSession?.host;
+  const host = currentView === 'files' ? selectedHost : activeSession?.host;
   const target = selectedHost || machineInfo?.hostname || '本机';
   byId('host-name').textContent = target;
   byId('host-pill').title = target + ' · 选择服务器';
   byId('host-pill').setAttribute('aria-label', '当前目标：' + target + '，选择服务器');
   byId('identity').textContent = host ? 'SSH · ' + host : machineInfo ? machineInfo.username + '@' + machineInfo.hostname : '本机终端';
-  byId('directory').textContent = host ? '远程服务器 · ' + host : machineInfo?.directory || '/home/vlab';
-  byId('shell').textContent = host ? 'ssh' : machineInfo?.shell || shellName;
+  byId('directory').textContent = host ? '远程服务器 · ' + host
+    : currentView === 'files' ? fileState.path || machineInfo?.directory || '本机'
+    : machineInfo?.directory || '~';
+  byId('shell').textContent = currentView === 'files' ? '文件管理' : host ? 'ssh' : machineInfo?.shell || shellName;
 }
 
 function renderSessions() {
@@ -165,7 +172,7 @@ function fit(session = activeSession) {
 
 function activateSession(session) {
   activeSession = session;
-  if (session) selectedHost = session.host;
+  if (session && currentView === 'terminal') selectedHost = session.host;
   for (const item of sessions) item.element.classList.toggle('active', item === session);
   if (session) session.unread = false;
   renderSessions();
@@ -173,7 +180,7 @@ function activateSession(session) {
   renderHostMenu();
   if (session) byId('session-tab-' + session.id)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   fit(session);
-  if (session) {
+  if (session && currentView === 'terminal') {
     session.terminal.focus();
     requestAnimationFrame(() => fit(session));
   }
@@ -399,6 +406,13 @@ byId('host-options').onclick = event => {
   if (!option || option.disabled) return;
   const host = option.dataset.host;
   closeHostMenu(true);
+  if (currentView === 'files') {
+    selectedHost = host;
+    updateControls();
+    renderHostMenu();
+    loadFileTarget();
+    return;
+  }
   const session = activeSession?.host === host && activeSession.state !== 'disconnected'
     ? activeSession
     : sessions.find(item => item.host === host && !item.removed && item.state !== 'disconnected');

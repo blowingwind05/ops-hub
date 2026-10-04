@@ -1,6 +1,7 @@
 """Local and SSH browser terminals backed by real Linux PTYs."""
 
 import asyncio
+import argparse
 import fcntl
 import glob
 import ipaddress
@@ -19,14 +20,31 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
+from file_manager import register_file_routes
+from configuration import Settings, listener_matches, load_settings
+
 ROOT = Path(__file__).resolve().parent
-PORT = 8088
-HOME_DIR = Path('/home/vlab')
+CONFIG = Settings()
+PORT = CONFIG.port
+HOME_DIR = CONFIG.directory
 SHELL = pwd.getpwuid(os.getuid()).pw_shell or '/bin/bash'
 MAX_SESSIONS = 8
 SESSIONS = set()
-SSH_CONFIG = HOME_DIR / '.ssh/config'
+SSH_CONFIG = CONFIG.ssh_config
 SSH_EXECUTABLE = shutil.which('ssh')
+
+
+def configure(settings):
+    global CONFIG, PORT, HOME_DIR, SSH_CONFIG
+    CONFIG = settings
+    PORT = settings.port
+    HOME_DIR = settings.directory
+    SSH_CONFIG = settings.ssh_config
+
+
+def allowed_request_hosts():
+    return {f'[{address}]:{PORT}' if ':' in address else f'{address}:{PORT}'
+            for address in CONFIG.allowed_hosts}
 
 
 def ssh_hosts(config=None):
@@ -76,15 +94,18 @@ def configured_hosts():
 
 
 @web.middleware
-async def local_only(request, handler):
-    """Reject cross-origin requests and DNS rebinding before opening a PTY."""
+async def access_control(request, handler):
+    """Validate the configured listener, client network, host, and origin."""
     try:
-        local_peer = ipaddress.ip_address(request.remote).is_loopback
+        peer = ipaddress.ip_address(request.remote)
+        socket_name = request.transport.get_extra_info('sockname') if request.transport else None
+        local_address = ipaddress.ip_address(socket_name[0]) if socket_name else None
+        allowed_peer = (any(peer in network for network in CONFIG.allowed_clients)
+                        and local_address is not None and listener_matches(local_address, CONFIG.listen))
     except (ValueError, TypeError):
-        local_peer = False
-    allowed_hosts = {f'localhost:{PORT}', f'127.0.0.1:{PORT}'}
-    if not local_peer or request.host not in allowed_hosts:
-        raise web.HTTPForbidden(text='Only local access is supported.')
+        allowed_peer = False
+    if not allowed_peer or request.host.lower() not in allowed_request_hosts():
+        raise web.HTTPForbidden(text='Access is not allowed by the server configuration.')
     origin = request.headers.get('Origin')
     if origin and origin != f'http://{request.host}':
         raise web.HTTPForbidden(text='Cross-origin access is not allowed.')
@@ -109,6 +130,8 @@ class TerminalSession:
         self.host = host
         executable = SSH_EXECUTABLE if host else SHELL
         arguments = [executable, '-tt', '--', host] if host else [Path(SHELL).name, '-l']
+        if host and SSH_CONFIG.resolve() != (Path.home() / '.ssh/config').resolve():
+            arguments[1:1] = ['-F', str(SSH_CONFIG)]
         self.loop = asyncio.get_running_loop()
         self.output = asyncio.Queue(maxsize=128)
         self.paused = False
@@ -318,16 +341,26 @@ async def shutdown(app):
 def create_app():
     # WebSocket disconnects end the receive loop. Do not also cancel the
     # handler on transport loss: cancellation can interrupt shell cleanup.
-    app = web.Application(middlewares=[local_only])
+    app = web.Application(middlewares=[access_control], client_max_size=16 * 1024 * 1024)
     app.on_response_prepare.append(response_headers)
     app.on_shutdown.append(shutdown)
     app.router.add_get('/', index)
     app.router.add_get('/api/info', info)
     app.router.add_get('/api/hosts', hosts)
+    register_file_routes(app, HOME_DIR)
     app.router.add_get('/ws', terminal)
     app.router.add_static('/static/', ROOT / 'static', show_index=False)
     return app
 
 
 if __name__ == '__main__':
-    web.run_app(create_app(), host='127.0.0.1', port=PORT, access_log=None, print=None)
+    parser = argparse.ArgumentParser(description='Ops Hub server management console')
+    parser.add_argument('--config', type=Path, help='Path to a TOML configuration file')
+    arguments = parser.parse_args()
+    path = arguments.config or ROOT / 'config.toml'
+    try:
+        if arguments.config is not None or path.exists():
+            configure(load_settings(path))
+    except (OSError, ValueError, RuntimeError) as error:
+        parser.error(str(error))
+    web.run_app(create_app(), host=list(CONFIG.listen), port=PORT, access_log=None, print=None)
