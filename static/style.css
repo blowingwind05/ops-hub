@@ -234,8 +234,19 @@ main {
 .files-actions button { background: transparent; border: 0; min-height: 30px; color: var(--muted); }
 .files-actions button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 #files-path-form { display: flex; gap: 8px; flex: 1; min-width: 0; }
+.files-address { display: flex; align-items: center; flex: 1; min-width: 0; height: 32px; border: 1px solid var(--line); border-radius: 3px; background: var(--terminal); }
+.files-address:focus-within { border-color: var(--accent); }
+#files-breadcrumbs { display: flex; align-items: center; flex: 1; min-width: 0; height: 100%; overflow-x: auto; scrollbar-width: thin; padding: 0 3px; gap: 2px; }
+.files-toolbar .file-breadcrumb, .files-toolbar #files-path-edit { background: transparent; border: 0; height: 28px; padding: 0 6px; flex-shrink: 0; }
+.files-toolbar .file-breadcrumb { font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.file-breadcrumb[aria-current="page"] { color: var(--accent-text); }
+.files-toolbar .file-breadcrumb:hover:not(:disabled), .files-toolbar #files-path-edit:hover:not(:disabled) { background: var(--hover); }
+.breadcrumb-separator { color: var(--muted); font-size: 13px; flex-shrink: 0; }
+.files-toolbar #files-path-edit { width: 28px; padding: 0; display: flex; align-items: center; justify-content: center; }
+#files-path-edit svg { width: 14px; height: 14px; }
 .files-card input[type="text"], .files-card input[type="search"], #file-operation-name { min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 3px; color: var(--text); background: var(--terminal); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
 #files-path { flex: 1; width: 100%; }
+.files-card .files-address #files-path { height: 100%; border: 0; background: transparent; outline: none; }
 .files-card input:focus, #file-operation-name:focus, #file-editor-content:focus { outline: 1px solid var(--accent); outline-offset: 0; }
 .files-card input::placeholder { color: var(--muted); }
 .files-actions { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
@@ -252,6 +263,13 @@ main {
 #files-search { width: 160px; }
 .files-card .file-search.is-open #files-search { height: 100%; padding: 0 8px 0 0; border: 0; background: transparent; outline: none; }
 .files-error { border-bottom: 1px solid var(--line); color: var(--error); font-size: 12px; padding: 10px 14px; flex-shrink: 0; max-height: 100px; overflow: auto; overflow-wrap: anywhere; }
+.file-upload-drop { position: fixed; inset: 16px; z-index: 20; display: flex; align-items: center; justify-content: center; padding: 24px; border: 2px dashed var(--accent); border-radius: 6px; background: color-mix(in srgb, var(--page) 88%, transparent); pointer-events: none; }
+.file-upload-drop-content { max-width: min(520px, 100%); text-align: center; }
+.file-upload-drop svg { display: block; width: 36px; height: 36px; margin: 0 auto 16px; color: var(--accent-text); }
+.file-upload-drop strong { font-size: 18px; font-weight: 600; }
+.file-upload-drop p { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.file-upload-drop[data-state="blocked"] { border-color: var(--warning); }
+.file-upload-drop[data-state="blocked"] svg { color: var(--warning); }
 .upload-progress { --progress-color: var(--accent); position: fixed; right: max(24px, env(safe-area-inset-right)); bottom: max(24px, env(safe-area-inset-bottom)); z-index: 9; width: min(380px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; padding: 14px 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); box-shadow: 0 8px 28px var(--shadow); }
 .upload-progress-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .upload-progress-title h2 { margin: 0; color: var(--text); font-size: 13px; font-weight: 600; }
@@ -283,6 +301,9 @@ main {
 .files-table th:nth-child(5) { width: 225px; }
 .files-table tbody tr:hover { background: var(--hover); }
 .files-table tbody tr:focus-within { background: var(--hover); }
+.files-table tr[draggable="true"] .file-name { cursor: grab; }
+.files-table tr.file-dragging { opacity: .5; }
+.files-table tr.file-drop-target, .files-toolbar .file-breadcrumb.file-drop-target { background: var(--selection); outline: 1px solid var(--accent); outline-offset: -1px; }
 .file-name { display: flex; align-items: center; gap: 10px; max-width: 100%; background: transparent; color: var(--text); font-size: 12px; text-align: left; word-break: break-all; padding: 2px 0; }
 .file-icon { width: 18px; height: 18px; flex-shrink: 0; color: var(--muted); }
 .folder-icon { color: var(--accent-text); }
@@ -294,9 +315,6 @@ main {
 .file-row-actions > span { color: var(--muted); font-size: 11px; }
 .files-empty { text-align: center; padding: 40px 16px; color: var(--muted); font-size: 12px; }
 .files-footer { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; flex-shrink: 0; }
-.files-remote { display: flex; flex: 1; min-width: 0; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; gap: 12px; }
-.files-remote h2 { font-size: 18px; font-weight: 500; margin: 0; }
-.files-remote p { font-size: 12px; color: var(--muted); margin: 0 0 8px; overflow-wrap: anywhere; }
 .file-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .file-dialog-heading h2 { margin: 0; }
 .file-dialog-heading > button, #file-trash-close { background: transparent; color: var(--muted); padding: 0; width: 30px; height: 30px; font-size: 24px; }
@@ -340,6 +358,8 @@ main {
   .files-toolbar { padding: 10px; gap: 6px; flex-wrap: wrap; }
   #files-path-form { order: 1; flex-basis: 100%; }
   .files-toolbar button, .files-actions button { padding: 6px 8px; font-size: 10px; }
+  .files-address { height: 30px; }
+  .files-toolbar .file-breadcrumb { font-size: 11px; }
   .files-actions button { min-height: 28px; }
   .files-actions { padding: 8px 10px; gap: 8px; }
   .upload-progress { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); padding: 12px; }

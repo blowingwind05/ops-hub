@@ -54,7 +54,7 @@
         <div class="files-toolbar">
           <button id="files-up" type="button" aria-label="上一级目录" title="上一级目录">↑</button>
           <button id="files-home" type="button">主目录</button>
-          <form id="files-path-form"><input id="files-path" type="text" spellcheck="false" aria-label="目录路径" placeholder="输入绝对路径或 ~/ 路径"><button type="submit">前往</button></form>
+          <form id="files-path-form"><div class="files-address"><nav id="files-breadcrumbs" aria-label="目录层级"></nav><input id="files-path" type="text" spellcheck="false" aria-label="目录路径" placeholder="输入绝对路径或 ~/ 路径" hidden><button id="files-path-edit" type="button" aria-label="编辑目录路径" title="编辑目录路径"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="/static/vendor/lucide/file-icons.svg#pencil"/></svg></button></div><button id="files-path-go" type="submit" hidden>前往</button></form>
           <button id="files-refresh" type="button">刷新</button>
         </div>
         <div class="files-actions">
@@ -64,14 +64,14 @@
         </div>
         <div id="files-error" class="files-error" role="alert" hidden></div>
         <div class="files-table-scroll"><table class="files-table"><thead><tr><th scope="col">名称</th><th scope="col">大小</th><th scope="col">修改时间</th><th scope="col">权限</th><th scope="col">操作</th></tr></thead><tbody id="files-list"></tbody></table><p id="files-empty" class="files-empty" role="status">正在读取目录…</p></div>
-        <div class="files-footer"><span id="files-summary" role="status" aria-live="polite">本机文件</span><span>上传 ≤ 256 MiB · 文本编辑 ≤ 2 MiB</span></div>
+        <div class="files-footer"><span id="files-summary" role="status" aria-live="polite">文件</span><span>上传 ≤ 256 MiB · 文本 ≤ 2 MiB</span></div>
       </div>
-      <div class="files-remote" id="files-remote" hidden><h2>远程文件管理尚未接入</h2><p id="files-remote-description"></p><button id="files-local-switch" class="primary" type="button">管理本机文件</button></div>
     </section>
     <footer class="bottom"><div class="machine-meta"><span id="directory">~</span><span class="meta-divider">/</span><span id="shell">bash</span></div><div class="shortcuts"><span><kbd>Ctrl</kbd> + <kbd>C</kbd> 中断</span><span><kbd>↑</kbd> 历史命令</span><span>关闭页面会结束所有终端</span></div></footer>
     <div class="notice" id="notice" role="status" aria-live="polite"></div>
   </main>
   </div>
+  <div id="files-drop-overlay" class="file-upload-drop" role="status" aria-live="polite" hidden><div class="file-upload-drop-content"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="/static/vendor/lucide/file-icons.svg#file-text"/></svg><strong id="files-drop-title">松开以上传文件</strong><p id="files-drop-description"></p></div></div>
   <section id="files-upload-progress" class="upload-progress" aria-labelledby="files-upload-title" hidden>
     <div class="upload-progress-title"><h2 id="files-upload-title">文件上传</h2><button id="files-upload-close" type="button" aria-label="关闭上传进度窗口" title="关闭窗口，上传继续">×</button></div>
     <div class="upload-progress-heading"><span id="files-upload-name" class="upload-progress-name"></span><span id="files-upload-percent">0%</span></div>

@@ -1,7 +1,13 @@
 'use strict';
 
 const fileState = { path: '', parent: '', entries: [], loaded: false, loading: false, busy: false,
-  controller: null, truncated: false, editor: null, operation: null };
+  host: '', home: '', capabilities: {}, controller: null, truncated: false, editor: null,
+  operation: null, drag: null, uploadDragDepth: 0 };
+const fileLocations = new Map();
+
+function fileURL(endpoint, parameters = {}, host = fileState.host) {
+  return endpoint + '?' + new URLSearchParams({ ...parameters, host });
+}
 
 function fileError(message = '') {
   byId('files-error').textContent = message;
@@ -17,13 +23,14 @@ async function fileRequest(url, options = {}) {
   return data;
 }
 
-function fileAction(payload) {
-  return fileRequest('/api/files/action', { method: 'POST',
+function fileAction(payload, host = fileState.host) {
+  return fileRequest(fileURL('/api/files/action', {}, host), { method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Ops-Hub-Request': '1' }, body: JSON.stringify(payload) });
 }
 
 function setFileBusy(busy) {
   fileState.busy = busy;
+  for (const id of ['host-pill', 'view-terminal', 'view-files']) byId(id).disabled = busy;
   for (const control of byId('files-local').querySelectorAll('button')) control.disabled = busy;
   byId('files-path').disabled = busy;
   byId('file-trash-empty').disabled = busy || !byId('file-trash-list').children.length;
@@ -52,6 +59,84 @@ function fileButton(label, handler, className = '') {
   return button;
 }
 
+function clearFileDrag() {
+  fileState.drag = null;
+  for (const node of document.querySelectorAll('.file-drop-target, .file-dragging')) {
+    node.classList.remove('file-drop-target', 'file-dragging');
+  }
+}
+
+function canDropFile(directory) {
+  const entry = fileState.drag;
+  if (!entry || fileState.busy || fileState.loading || fileState.host !== selectedHost || currentView !== 'files') return false;
+  if (directory === entry.path.slice(0, entry.path.lastIndexOf('/')) || (directory === '/' && entry.path.lastIndexOf('/') === 0)) return false;
+  return entry.kind !== 'directory' || (directory !== entry.path && !directory.startsWith(entry.path + '/'));
+}
+
+function bindFileDrop(node, directory) {
+  node.dataset.dropPath = directory;
+  node.ondragover = event => {
+    if (!fileState.drag) return;
+    event.preventDefault();
+    const allowed = canDropFile(directory);
+    event.dataTransfer.dropEffect = allowed ? 'move' : 'none';
+    node.classList.toggle('file-drop-target', allowed);
+  };
+  node.ondragleave = event => {
+    if (!node.contains(event.relatedTarget)) node.classList.remove('file-drop-target');
+  };
+  node.ondrop = event => {
+    if (!fileState.drag) return;
+    event.preventDefault();
+    const entry = fileState.drag, allowed = canDropFile(directory);
+    clearFileDrag();
+    if (allowed) performFileAction({ action: 'move', path: entry.path, destination: directory, revision: entry.revision }, '已移动 ' + entry.name);
+  };
+}
+
+function renderFileBreadcrumbs() {
+  const nav = byId('files-breadcrumbs');
+  const fragment = document.createDocumentFragment();
+  if (fileState.path) {
+    let path = '';
+    const parts = ['/', ...fileState.path.split('/').filter(Boolean)];
+    for (const [index, part] of parts.entries()) {
+      path = index === 0 ? '/' : (path === '/' ? '/' : path + '/') + part;
+      if (index) {
+        const separator = document.createElement('span');
+        separator.className = 'breadcrumb-separator';
+        separator.textContent = '›';
+        separator.setAttribute('aria-hidden', 'true');
+        fragment.append(separator);
+      }
+      const destination = path;
+      const button = fileButton(part, () => loadFiles(destination), 'file-breadcrumb');
+      button.dataset.path = path;
+      button.title = path;
+      if (index === parts.length - 1) button.setAttribute('aria-current', 'page');
+      bindFileDrop(button, destination);
+      fragment.append(button);
+    }
+  }
+  nav.replaceChildren(fragment);
+  byId('files-path-edit').disabled = fileState.busy || fileState.loading;
+}
+
+function editFilePath(editing) {
+  byId('files-path').hidden = !editing;
+  byId('files-breadcrumbs').hidden = editing;
+  byId('files-path-go').hidden = !editing;
+  byId('files-path-edit').setAttribute('aria-label', editing ? '收起目录路径' : '编辑目录路径');
+  byId('files-path-edit').title = editing ? '收起目录路径' : '编辑目录路径';
+  if (editing) {
+    byId('files-path').focus();
+    byId('files-path').select();
+  } else {
+    byId('files-path').value = fileState.path;
+    requestAnimationFrame(() => { byId('files-breadcrumbs').scrollLeft = byId('files-breadcrumbs').scrollWidth; });
+  }
+}
+
 function renderFiles() {
   const query = byId('files-search').value.toLocaleLowerCase();
   const showHidden = byId('files-hidden').checked;
@@ -60,8 +145,20 @@ function renderFiles() {
   for (const entry of entries) {
     const row = document.createElement('tr');
     row.dataset.path = entry.path;
+    row.draggable = !entry.protected && Boolean(entry.revision) && !fileState.busy && !fileState.loading;
+    row.ondragstart = event => {
+      if (!row.draggable || event.target.closest('.file-row-actions')) { event.preventDefault(); return; }
+      clearFileDrag();
+      fileState.drag = entry;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('application/x-ops-hub-file', entry.path);
+      event.dataTransfer.setData('text/plain', entry.path);
+      row.classList.add('file-dragging');
+    };
+    row.ondragend = clearFileDrag;
     const cell = document.createElement('td');
     const directory = entry.kind === 'directory' || entry.target_directory;
+    if (directory && !entry.protected) bindFileDrop(row, entry.path);
     const name = fileButton(entry.name, () => directory ? loadFiles(entry.path) : openFile(entry), 'file-name');
     name.disabled = fileState.busy || fileState.loading || entry.protected || (!directory && entry.kind !== 'file');
     name.title = entry.protected ? '受保护的目录，请使用终端管理' : entry.link_target ? '链接到 ' + entry.link_target : directory ? '打开目录' : '打开文本编辑器';
@@ -90,15 +187,16 @@ function renderFiles() {
     actions.className = 'file-row-actions';
     if (!entry.protected && entry.revision) {
       if (entry.kind === 'file') {
-        actions.append(fileButton('编辑', () => openFile(entry)));
+        actions.append(fileButton(fileState.capabilities.edit === false ? '查看' : '编辑', () => openFile(entry)));
         const download = document.createElement('a');
         download.textContent = '下载';
-        download.href = '/api/files/download?' + new URLSearchParams({ path: entry.path });
+        download.href = fileURL('/api/files/download', { path: entry.path });
         download.className = 'file-download';
         download.setAttribute('download', entry.name);
         actions.append(download);
       }
-      actions.append(fileButton('重命名', () => renameFile(entry)), fileButton('删除', () => deleteFile(entry), 'file-delete'));
+      actions.append(fileButton('重命名', () => renameFile(entry)));
+      if (fileState.capabilities.trash !== false) actions.append(fileButton('删除', () => deleteFile(entry), 'file-delete'));
     } else {
       const unavailable = document.createElement('span');
       unavailable.textContent = '受保护';
@@ -112,21 +210,29 @@ function renderFiles() {
   byId('files-empty').textContent = fileState.loading ? '正在读取目录…' : fileState.loaded ? '没有符合条件的文件' : '请输入目录路径后重试';
   byId('files-summary').textContent = fileState.loading ? '正在读取目录…' : entries.length + ' 项 / 共 ' + fileState.entries.length + ' 项' + (fileState.truncated ? ' · 仅显示前 10000 项，请进入子目录查看' : '');
   for (const id of ['files-upload', 'files-mkdir', 'files-create']) byId(id).disabled = fileState.busy || fileState.loading || !fileState.loaded;
+  byId('files-trash').hidden = fileState.capabilities.trash === false;
+  renderFileBreadcrumbs();
 }
 
 async function loadFiles(path = fileState.path) {
-  if (selectedHost || currentView !== 'files') return;
+  if (currentView !== 'files') return;
+  const host = selectedHost;
+  clearFileDrag();
   fileState.controller?.abort();
   const controller = new AbortController();
   fileState.controller = controller;
   fileState.loading = true;
   fileError();
   renderFiles();
+  updateControls();
   try {
-    const data = await fileRequest('/api/files?' + new URLSearchParams({ path: path || '' }), { signal: controller.signal });
-    if (controller !== fileState.controller || selectedHost || currentView !== 'files') return;
-    Object.assign(fileState, { path: data.path, parent: data.parent, entries: data.entries, loaded: true, truncated: data.truncated });
+    const data = await fileRequest(fileURL('/api/files', { path: path || '' }, host), { signal: controller.signal });
+    if (controller !== fileState.controller || host !== selectedHost || currentView !== 'files') return;
+    Object.assign(fileState, { host, home: data.home, capabilities: data.capabilities || {},
+      path: data.path, parent: data.parent, entries: data.entries, loaded: true, truncated: data.truncated });
+    fileLocations.set(host, data.path);
     byId('files-path').value = data.path;
+    editFilePath(false);
     byId('directory').textContent = data.path;
     byId('files-up').disabled = data.path === data.parent;
   } catch (error) {
@@ -135,19 +241,23 @@ async function loadFiles(path = fileState.path) {
       byId('files-path').value = fileState.path || path || '';
     }
   } finally {
-    if (controller === fileState.controller) { fileState.loading = false; renderFiles(); }
+    if (controller === fileState.controller) { fileState.loading = false; renderFiles(); updateControls(); }
   }
 }
 
 function loadFileTarget() {
+  clearFileDrag();
   fileState.controller?.abort();
-  byId('files-local').hidden = Boolean(selectedHost);
-  byId('files-remote').hidden = !selectedHost;
-  byId('files-remote-description').textContent = '当前选择：' + selectedHost + '。本机文件管理已可使用，该服务器仍可通过终端管理文件。';
-  if (!selectedHost) loadFiles();
+  if (fileState.host !== selectedHost) {
+    Object.assign(fileState, { host: selectedHost, path: fileLocations.get(selectedHost) || '',
+      parent: '', home: '', entries: [], loaded: false, capabilities: selectedHost ? { edit: false, trash: false } : {} });
+    byId('files-path').value = fileState.path;
+  }
+  return loadFiles();
 }
 
 function setWorkspaceView(view) {
+  clearFileDrag();
   currentView = view;
   const files = view === 'files';
   byId('terminal-workspace').hidden = files;
@@ -163,7 +273,7 @@ function setWorkspaceView(view) {
   updateControls();
   renderHostMenu();
   document.querySelector('.host-menu-hint').textContent = files ? '选择后切换文件管理目标' : '选择后切换或新建终端';
-  if (files) loadFileTarget();
+  if (files) return loadFileTarget();
   else { fileState.controller?.abort(); requestAnimationFrame(() => fit()); }
 }
 
@@ -205,7 +315,7 @@ async function performFileAction(payload, success) {
 }
 
 async function createFileItem(directory) {
-  if (fileState.busy || !fileState.loaded || selectedHost) return;
+  if (fileState.busy || fileState.loading || !fileState.loaded) return;
   const path = fileState.path;
   const name = await askFileOperation(directory ? '新建文件夹' : '新建文本文件', '创建于 ' + path, '', true, '创建');
   if (name === null) return;
@@ -232,21 +342,26 @@ async function openFile(entry) {
   setFileBusy(true);
   fileError();
   try {
-    const data = await fileRequest('/api/files/text?' + new URLSearchParams({ path: entry.path }));
-    if (selectedHost || currentView !== 'files') return;
+    const host = fileState.host;
+    const data = await fileRequest(fileURL('/api/files/text', { path: entry.path }, host));
+    if (selectedHost !== host || currentView !== 'files') return;
+    data.host = host;
     data.newline = data.content.includes('\r\n') && !/(^|[^\r])\n/.test(data.content) ? '\r\n' : '\n';
     data.displayContent = data.content.replace(/\r\n?/g, '\n');
     fileState.editor = data;
     byId('file-editor-path').textContent = data.path;
     byId('file-editor-content').value = data.content;
-    byId('file-editor-status').textContent = 'UTF-8 · 保存前自动备份，可在回收站恢复';
+    byId('file-editor-title').textContent = data.readonly ? '查看文件' : '编辑文件';
+    byId('file-editor-content').readOnly = Boolean(data.readonly);
+    byId('file-editor-save').hidden = Boolean(data.readonly);
+    byId('file-editor-status').textContent = data.readonly ? 'UTF-8 · 远程文件只读查看' : 'UTF-8 · 保存前自动备份，可在回收站恢复';
     byId('file-editor').showModal();
     byId('file-editor-content').focus();
   } catch (error) { fileError(error.message); }
   finally { setFileBusy(false); }
 }
 
-function editorDirty() { return fileState.editor && byId('file-editor-content').value !== fileState.editor.displayContent; }
+function editorDirty() { return fileState.editor && !fileState.editor.readonly && byId('file-editor-content').value !== fileState.editor.displayContent; }
 
 async function closeFileEditor() {
   if (byId('file-editor-save').disabled) return;
@@ -260,7 +375,7 @@ async function closeFileEditor() {
 
 async function saveFileEditor(event) {
   event.preventDefault();
-  if (!fileState.editor || byId('file-editor-save').disabled) return;
+  if (!fileState.editor || fileState.editor.readonly || byId('file-editor-save').disabled) return;
   const editor = fileState.editor, displayContent = byId('file-editor-content').value;
   const content = editor.newline === '\r\n' ? displayContent.replace(/\n/g, '\r\n') : displayContent;
   if (new TextEncoder().encode(content).length > 2 * 1024 * 1024) {
@@ -271,7 +386,7 @@ async function saveFileEditor(event) {
   byId('file-editor-content').readOnly = true;
   byId('file-editor-status').textContent = '正在保存…';
   try {
-    const result = await fileAction({ action: 'save', path: editor.path, content, revision: editor.revision });
+    const result = await fileAction({ action: 'save', path: editor.path, content, revision: editor.revision }, editor.host);
     Object.assign(editor, { content, displayContent, revision: result.revision });
     byId('file-editor-status').textContent = '已保存 · 上一版本已备份到回收站';
     await loadFiles();
@@ -302,7 +417,8 @@ function showUploadProgress(file, index, total, completed) {
 function uploadWithProgress(file, path, index, total, completed) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open('POST', '/api/files/upload?' + new URLSearchParams({ path }));
+    const host = fileState.host;
+    request.open('POST', fileURL('/api/files/upload', { path }, host));
     request.setRequestHeader('X-Ops-Hub-Request', '1');
     let loaded = 0, transferTotal = null;
     const samples = [{ time: performance.now(), loaded: 0 }];
@@ -333,11 +449,13 @@ function uploadWithProgress(file, path, index, total, completed) {
     };
     request.upload.onload = () => {
       clearInterval(timer);
-      byId('files-upload-bar').value = 100;
-      byId('files-upload-percent').textContent = '100%';
+      if (host) byId('files-upload-bar').removeAttribute('value');
+      else byId('files-upload-bar').value = 100;
+      byId('files-upload-percent').textContent = host ? '远端传输中' : '100%';
       byId('files-upload-speed').textContent = '—';
-      byId('files-upload-eta').textContent = '等待保存';
-      byId('files-upload-status').textContent = '传输完成，正在保存 · 第 ' + (index + 1) + '/' + total + ' 个 · ' + completed + ' 个已完成';
+      byId('files-upload-eta').textContent = host ? '等待远端确认' : '等待保存';
+      byId('files-upload-status').textContent = (host ? '已上传至中枢，正在传输至 ' + host : '传输完成，正在保存')
+        + ' · 第 ' + (index + 1) + '/' + total + ' 个 · ' + completed + ' 个已完成';
     };
     request.onload = () => {
       clearInterval(timer);
@@ -356,7 +474,7 @@ function uploadWithProgress(file, path, index, total, completed) {
 }
 
 async function uploadFiles(files) {
-  if (!files.length || fileState.busy || selectedHost) return;
+  if (!files.length || fileState.busy || fileState.loading || !fileState.loaded || fileState.host !== selectedHost || currentView !== 'files') return;
   const path = fileState.path;
   byId('files-upload-progress').hidden = false;
   setFileBusy(true);
@@ -410,7 +528,7 @@ async function loadTrash() {
   byId('file-trash-status').textContent = '正在读取回收站…';
   byId('file-trash-empty').disabled = true;
   try {
-    const data = await fileRequest('/api/files/trash');
+    const data = await fileRequest(fileURL('/api/files/trash'));
     const fragment = document.createDocumentFragment();
     for (const entry of data.entries) {
       const row = document.createElement('div');
@@ -445,6 +563,88 @@ async function loadTrash() {
   finally { byId('file-trash-empty').disabled = fileState.busy || !byId('file-trash-list').children.length; }
 }
 
+function externalFileDrag(event) {
+  return !fileState.drag && Array.from(event.dataTransfer?.types || []).includes('Files');
+}
+
+function uploadDropIssue() {
+  if (fileState.busy) return '正在处理文件，请等待当前操作完成。';
+  if (document.querySelector('dialog[open]')) return '请先关闭当前弹窗，再拖入文件。';
+  if (fileState.loading) return '正在读取目录，请稍后再拖入文件。';
+  if (currentView === 'files' && !fileState.loaded) return '请先打开可访问的本机目录。';
+  if (!selectedHost && !fileState.path && !machineInfo?.directory) return '正在读取本机信息，请稍后再拖入文件。';
+  return '';
+}
+
+function hideUploadDrop() {
+  fileState.uploadDragDepth = 0;
+  byId('files-drop-overlay').hidden = true;
+}
+
+function showUploadDrop() {
+  const issue = uploadDropIssue();
+  const title = issue ? '暂时无法上传' : '松开以上传文件';
+  const path = fileState.host === selectedHost ? fileState.path : fileLocations.get(selectedHost);
+  const description = issue || '上传至' + (selectedHost || '本机') + '：' + (path || (selectedHost ? '主目录' : machineInfo.directory));
+  const overlay = byId('files-drop-overlay');
+  overlay.dataset.state = issue ? 'blocked' : 'ready';
+  overlay.hidden = false;
+  if (byId('files-drop-title').textContent !== title) byId('files-drop-title').textContent = title;
+  if (byId('files-drop-description').textContent !== description) byId('files-drop-description').textContent = description;
+  return !issue;
+}
+
+async function uploadDroppedFiles(event) {
+  event.preventDefault();
+  hideUploadDrop();
+  const issue = uploadDropIssue();
+  if (issue) { notify(issue); return; }
+  const transfer = event.dataTransfer;
+  const items = Array.from(transfer.items || []).filter(item => item.kind === 'file');
+  if (items.some(item => item.webkitGetAsEntry?.()?.isDirectory)) {
+    notify('暂不支持上传文件夹，请单独拖入文件。');
+    return;
+  }
+  // Read the File objects during the drop event, before the browser protects the transfer.
+  const files = Array.from(transfer.files || []);
+  if (!files.length) { notify('未能读取拖入的文件，请使用上传文件按钮重试。'); return; }
+  const host = selectedHost;
+  const destination = (fileState.host === host ? fileState.path : fileLocations.get(host)) || (host ? '' : machineInfo.directory);
+  if (currentView !== 'files') await setWorkspaceView('files');
+  if (uploadDropIssue() || !fileState.loaded || selectedHost !== host || (destination && fileState.path !== destination) || currentView !== 'files') {
+    notify('上传目录尚未就绪或已切换，请重新拖入文件。');
+    return;
+  }
+  await uploadFiles(files);
+}
+
+document.addEventListener('dragenter', event => {
+  if (!externalFileDrag(event)) return;
+  event.preventDefault();
+  fileState.uploadDragDepth++;
+  showUploadDrop();
+});
+document.addEventListener('dragover', event => {
+  if (!externalFileDrag(event)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = showUploadDrop() ? 'copy' : 'none';
+});
+document.addEventListener('dragleave', event => {
+  if (!fileState.uploadDragDepth) return;
+  fileState.uploadDragDepth = Math.max(0, fileState.uploadDragDepth - 1);
+  if (!fileState.uploadDragDepth) hideUploadDrop();
+});
+document.addEventListener('drop', event => {
+  if (externalFileDrag(event)) uploadDroppedFiles(event).catch(() => notify('文件上传失败，请重试。'));
+  else hideUploadDrop();
+});
+document.addEventListener('dragend', hideUploadDrop);
+// External drags may end outside this document without a dragend event.
+document.addEventListener('pointermove', event => { if (!event.buttons) hideUploadDrop(); });
+document.addEventListener('pointerdown', hideUploadDrop);
+window.addEventListener('blur', hideUploadDrop);
+document.addEventListener('keydown', event => { if (event.key === 'Escape') hideUploadDrop(); });
+
 function updateFileSearchButton() {
   const button = byId('files-search-toggle'), input = byId('files-search');
   const open = !input.hidden;
@@ -468,10 +668,13 @@ function toggleFileSearch(open, { clear = true, focus = true } = {}) {
 
 byId('view-terminal').onclick = () => setWorkspaceView('terminal');
 byId('view-files').onclick = () => setWorkspaceView('files');
-byId('files-local-switch').onclick = () => { selectedHost = ''; updateControls(); renderHostMenu(); loadFileTarget(); };
 byId('files-path-form').onsubmit = event => { event.preventDefault(); if (!fileState.busy) loadFiles(byId('files-path').value); };
+byId('files-path-edit').onclick = () => editFilePath(byId('files-path').hidden);
+byId('files-path').onkeydown = event => {
+  if (event.key === 'Escape') { event.preventDefault(); editFilePath(false); byId('files-path-edit').focus(); }
+};
 byId('files-up').onclick = () => loadFiles(fileState.parent);
-byId('files-home').onclick = () => loadFiles(machineInfo?.directory || '');
+byId('files-home').onclick = () => loadFiles(fileState.home || (selectedHost ? '' : machineInfo?.directory) || '');
 byId('files-refresh').onclick = () => loadFiles();
 byId('files-hidden').onchange = renderFiles;
 byId('files-search').oninput = () => { renderFiles(); updateFileSearchButton(); };

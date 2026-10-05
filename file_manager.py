@@ -33,8 +33,6 @@ def fail(status, message):
 def endpoint(handler):
     @functools.wraps(handler)
     async def wrapped(request):
-        if request.query.get('host'):
-            return fail(400, '目前仅支持本机文件管理，请切换到本机。')
         if request.method not in ('GET', 'HEAD'):
             if (request.headers.get('Origin') != f'http://{request.host}'
                     or request.headers.get('X-Ops-Hub-Request') != '1'):
@@ -58,7 +56,7 @@ def endpoint(handler):
                 errno.ELOOP: (400, '不能直接编辑或下载符号链接，请打开其目标路径。'),
                 errno.ENOSPC: (507, '磁盘空间不足。'),
                 errno.EROFS: (403, '该文件系统只读。'),
-                errno.EXDEV: (400, '无法跨文件系统移入回收站，此操作未执行。'),
+                errno.EXDEV: (400, '此操作不能跨文件系统执行，源文件已保留。'),
                 errno.ENAMETOOLONG: (400, '文件名或路径过长。'),
             }
             code, message = messages.get(error.errno, (400, '文件操作失败。'))
@@ -314,11 +312,22 @@ def mutate(payload, home):
             return write_text(destination, payload.get('content', ''), home, create=True)
         if action == 'save':
             return write_text(path, payload['content'], home, payload.get('revision'))
-        if action not in ('rename', 'delete'):
+        if action not in ('rename', 'move', 'delete'):
             raise ValueError('不支持此文件操作。')
         if path == Path('/') or path == Path(home) or (Path(home) / TRASH_NAME).is_relative_to(path):
-            raise ValueError('不能重命名或删除根目录、用户主目录和回收站所在目录。')
-        check_revision(path, payload.get('revision'))
+            raise ValueError('不能移动、重命名或删除根目录、用户主目录和回收站所在目录。')
+        metadata = check_revision(path, payload.get('revision'))
+        if action == 'move':
+            directory = path_value(payload['destination'], home, follow=True)
+            if not stat.S_ISDIR(directory.stat().st_mode):
+                raise ValueError('移动目标必须是文件夹。')
+            if stat.S_ISDIR(metadata.st_mode) and (directory == path or directory.is_relative_to(path)):
+                raise ValueError('不能将文件夹移入自身或其子目录。')
+            destination = path_value(str(directory / path.name), home)
+            if destination == path:
+                raise ValueError('文件已位于目标目录。')
+            rename_new(path, destination)
+            return {'path': str(destination)}
         if action == 'rename':
             destination = path_value(str(path.parent / name_value(payload['name'])), home)
             rename_new(path, destination)
@@ -326,13 +335,41 @@ def mutate(payload, home):
         return archive(path, home, 'delete')
 
 
-def register_file_routes(app, home):
-    @endpoint
+def register_file_routes(app, home, remote_factory=None):
+    connections = asyncio.Semaphore(4)
+
+    def target(operation):
+        def decorate(handler):
+            @endpoint
+            @functools.wraps(handler)
+            async def dispatch(request):
+                host = request.query.get('host', '')
+                if not host:
+                    return await handler(request)
+                if remote_factory is None:
+                    raise ValueError('远程文件管理未配置。')
+                remote = remote_factory(host)
+                async with connections:
+                    try:
+                        # Finish connection creation before cleanup even if the browser leaves.
+                        connecting = asyncio.create_task(asyncio.to_thread(remote.connect))
+                        try:
+                            await asyncio.shield(connecting)
+                        except asyncio.CancelledError:
+                            await connecting
+                            raise
+                        return await getattr(remote, operation)(request)
+                    finally:
+                        await asyncio.to_thread(remote.close)
+            return dispatch
+        return decorate
+
+    @target('listing')
     async def listing(request):
         path = path_value(request.query.get('path', ''), home, follow=True)
         return web.json_response(await asyncio.to_thread(directory_listing, path, home))
 
-    @endpoint
+    @target('text')
     async def text(request):
         path = path_value(request.query.get('path', ''), home)
         data, metadata = await asyncio.to_thread(regular_bytes, path)
@@ -340,7 +377,7 @@ def register_file_routes(app, home):
             return fail(415, '该文件包含二进制内容，请使用下载功能。')
         return web.json_response({'path': str(path), 'content': data.decode('utf-8'), 'revision': revision(metadata)})
 
-    @endpoint
+    @target('download')
     async def download(request):
         path = path_value(request.query.get('path', ''), home)
         if not stat.S_ISREG((await asyncio.to_thread(path.lstat)).st_mode):
@@ -350,14 +387,14 @@ def register_file_routes(app, home):
             'Content-Disposition': "attachment; filename*=UTF-8''" + quote(path.name, safe=''),
         })
 
-    @endpoint
+    @target('action')
     async def action(request):
         payload = await request.json()
         if not isinstance(payload, dict):
             raise ValueError('无效的文件操作。')
         return web.json_response(await asyncio.to_thread(mutate, payload, home))
 
-    @endpoint
+    @target('upload')
     async def upload(request):
         directory = path_value(request.query.get('path', ''), home, follow=True)
         if not directory.is_dir():
@@ -386,7 +423,7 @@ def register_file_routes(app, home):
             if temporary is not None:
                 await asyncio.to_thread(temporary.unlink, missing_ok=True)
 
-    @endpoint
+    @target('trash')
     async def trash(request):
         return web.json_response(await asyncio.to_thread(trash_records, home))
 

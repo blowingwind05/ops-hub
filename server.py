@@ -21,6 +21,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from file_manager import register_file_routes
+from remote_files import RemoteFiles
 from configuration import Settings, listener_matches, load_settings
 
 ROOT = Path(__file__).resolve().parent
@@ -347,7 +348,12 @@ def create_app():
     app.router.add_get('/', index)
     app.router.add_get('/api/info', info)
     app.router.add_get('/api/hosts', hosts)
-    register_file_routes(app, HOME_DIR)
+    def remote_files(host):
+        if host not in {item['alias'] for item in configured_hosts()}:
+            raise ValueError('请选择 SSH 配置中已有的服务器。')
+        return RemoteFiles(host, SSH_CONFIG, SSH_EXECUTABLE)
+
+    register_file_routes(app, HOME_DIR, remote_files)
     app.router.add_get('/ws', terminal)
     app.router.add_static('/static/', ROOT / 'static', show_index=False)
     return app

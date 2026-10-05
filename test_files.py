@@ -74,6 +74,95 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.work / 'renamed.txt').read_text(), 'original')
         await self.action('mkdir', status=400, path=str(self.work), name='../escape')
 
+    async def test_move_files_folders_and_symlinks_without_overwriting(self):
+        destination = self.work / 'destination'
+        destination.mkdir()
+        file = self.work / '中文 file.txt'
+        file.write_text('preserve content')
+        file.chmod(0o640)
+        result = await self.action('move', path=str(file), destination=str(destination),
+                                   revision=file_manager.revision(file.lstat()))
+        moved = destination / file.name
+        self.assertEqual(result['path'], str(moved))
+        self.assertFalse(file.exists())
+        self.assertEqual(moved.read_text(), 'preserve content')
+        self.assertEqual(moved.stat().st_mode & 0o777, 0o640)
+        file.write_text('keep source')
+        await self.action('move', status=409, path=str(file), destination=str(destination),
+                          revision=file_manager.revision(file.lstat()))
+        self.assertEqual(file.read_text(), 'keep source')
+        self.assertEqual(moved.read_text(), 'preserve content')
+        folder = self.work / 'folder'
+        folder.mkdir()
+        (folder / 'nested.txt').write_text('nested')
+        await self.action('move', path=str(folder), destination=str(destination),
+                          revision=file_manager.revision(folder.lstat()))
+        self.assertEqual((destination / 'folder' / 'nested.txt').read_text(), 'nested')
+        link = self.work / 'link'
+        link.symlink_to(file)
+        await self.action('move', path=str(link), destination=str(destination),
+                          revision=file_manager.revision(link.lstat()))
+        self.assertTrue((destination / 'link').is_symlink())
+        self.assertEqual(file.read_text(), 'keep source')
+
+    async def test_move_to_ancestor_and_symlinked_directory(self):
+        folder = self.work / 'folder'
+        folder.mkdir()
+        source = folder / 'up.txt'
+        source.write_text('move up')
+        await self.action('move', path=str(source), destination=str(self.work),
+                          revision=file_manager.revision(source.lstat()))
+        self.assertEqual((self.work / 'up.txt').read_text(), 'move up')
+        alias = self.work / 'alias'
+        alias.symlink_to(folder, target_is_directory=True)
+        await self.action('move', path=str(self.work / 'up.txt'), destination=str(alias),
+                          revision=file_manager.revision((self.work / 'up.txt').lstat()))
+        self.assertEqual(source.read_text(), 'move up')
+        await self.action('move', status=400, path=str(source), destination=str(alias),
+                          revision=file_manager.revision(source.lstat()))
+        self.assertEqual(source.read_text(), 'move up')
+
+    async def test_move_rejects_descendants_protected_paths_and_stale_sources(self):
+        folder = self.work / 'folder'
+        child = folder / 'child'
+        child.mkdir(parents=True)
+        alias = self.work / 'child-alias'
+        alias.symlink_to(child)
+        for target in [folder, child, alias]:
+            await self.action('move', status=400, path=str(folder), destination=str(target),
+                              revision=file_manager.revision(folder.lstat()))
+        for source in [Path('/'), self.home, self.home / '.local']:
+            if source != Path('/'):
+                source.mkdir(exist_ok=True)
+            await self.action('move', status=400, path=str(source), destination=str(self.work),
+                              revision=file_manager.revision(source.lstat()))
+        file = self.work / 'stale.txt'
+        file.write_text('original')
+        old_revision = file_manager.revision(file.lstat())
+        file.write_text('updated')
+        await self.action('move', status=409, path=str(file), destination=str(folder), revision=old_revision)
+        self.assertEqual(file.read_text(), 'updated')
+        await self.action('move', status=400, path=str(file), destination=str(file),
+                          revision=file_manager.revision(file.lstat()))
+        await self.action('move', status=404, path=str(file), destination=str(self.work / 'missing'),
+                          revision=file_manager.revision(file.lstat()))
+        trash = self.home / file_manager.TRASH_NAME
+        trash.mkdir(parents=True)
+        await self.action('move', status=403, path=str(file), destination=str(trash),
+                          revision=file_manager.revision(file.lstat()))
+
+    async def test_move_cross_filesystem_error_keeps_source(self):
+        source = self.work / 'source.txt'
+        source.write_text('preserved')
+        destination = self.work / 'destination'
+        destination.mkdir()
+        with patch.object(file_manager, 'rename_new', side_effect=OSError(18, 'Invalid cross-device link')):
+            result = await self.action('move', status=400, path=str(source), destination=str(destination),
+                                       revision=file_manager.revision(source.lstat()))
+        self.assertIn('跨文件系统', result['error'])
+        self.assertEqual(source.read_text(), 'preserved')
+        self.assertFalse((destination / source.name).exists())
+
     async def test_edit_backup_restore_conflicts_and_preserves_permissions(self):
         path = self.work / 'settings.txt'
         path.write_bytes(b'first\r\nsecond\r\n')

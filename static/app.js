@@ -93,8 +93,8 @@ function updateControls() {
   document.querySelector('.terminal-card').dataset.state = session?.state || 'disconnected';
   byId('status-text').textContent = session?.statusText || '无会话';
   if (currentView === 'files') {
-    byId('status').dataset.state = selectedHost ? 'disconnected' : 'connected';
-    byId('status-text').textContent = selectedHost ? '未接入' : '本机文件';
+    byId('status').dataset.state = fileState.loading ? 'connecting' : fileState.loaded ? 'connected' : 'disconnected';
+    byId('status-text').textContent = fileState.loading ? '读取中' : fileState.loaded ? selectedHost ? 'SFTP 已连接' : '本机文件' : '读取失败';
   }
   for (const id of ['copy', 'clear', 'font-up', 'font-down']) byId(id).disabled = !session;
   for (const id of ['paste', 'interrupt']) byId(id).disabled = session?.state !== 'connected';
@@ -113,8 +113,8 @@ function updateMachineInfo() {
   byId('host-pill').title = target + ' · 选择服务器';
   byId('host-pill').setAttribute('aria-label', '当前目标：' + target + '，选择服务器');
   byId('identity').textContent = host ? 'SSH · ' + host : machineInfo ? machineInfo.username + '@' + machineInfo.hostname : '本机终端';
-  byId('directory').textContent = host ? '远程服务器 · ' + host
-    : currentView === 'files' ? fileState.path || machineInfo?.directory || '本机'
+  byId('directory').textContent = currentView === 'files' ? fileState.path || (host ? '远程主目录' : machineInfo?.directory) || '本机'
+    : host ? '远程服务器 · ' + host
     : machineInfo?.directory || '~';
   byId('shell').textContent = currentView === 'files' ? '文件管理' : host ? 'ssh' : machineInfo?.shell || shellName;
 }
@@ -407,6 +407,7 @@ byId('host-options').onclick = event => {
   const host = option.dataset.host;
   closeHostMenu(true);
   if (currentView === 'files') {
+    if (fileState.busy) return;
     selectedHost = host;
     updateControls();
     renderHostMenu();
