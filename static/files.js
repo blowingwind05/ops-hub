@@ -517,10 +517,11 @@ async function performTrashAction(payload, success) {
     await loadTrash();
     if (result.errors?.length) byId('file-trash-status').textContent = '已删除 ' + result.deleted + ' 条，'
       + result.errors.length + ' 条删除失败。请检查访问权限和回收站路径后重试。';
+    else if (result.warning) byId('file-trash-status').textContent = result.warning;
   } catch (error) { byId('file-trash-status').textContent = error.message; }
   finally {
     setFileBusy(false);
-    for (const button of byId('file-trash-list').querySelectorAll('button')) button.disabled = false;
+    for (const button of byId('file-trash-list').querySelectorAll('button')) button.disabled = button.dataset.unavailable === 'true';
   }
 }
 
@@ -538,7 +539,8 @@ async function loadTrash() {
       const path = document.createElement('strong');
       path.textContent = entry.path;
       const detail = document.createElement('span');
-      detail.textContent = (entry.operation === 'edit' ? '编辑备份' : '已删除') + ' · ' + new Date(entry.time * 1000).toLocaleString('zh-CN', { hour12: false });
+      detail.textContent = (entry.recoverable === false ? '内容缺失或记录损坏，可清理' : entry.operation === 'edit' ? '编辑备份' : '已删除')
+        + ' · ' + new Date(entry.time * 1000).toLocaleString('zh-CN', { hour12: false });
       labels.append(path, detail);
       const actions = document.createElement('div');
       actions.className = 'trash-actions';
@@ -554,6 +556,10 @@ async function loadTrash() {
         if (!confirmed) return;
         await performTrashAction({ action: 'purge', id: entry.id }, '已彻底删除');
       }, 'trash-delete'));
+      if (entry.recoverable === false) {
+        actions.firstElementChild.disabled = true;
+        actions.firstElementChild.dataset.unavailable = 'true';
+      }
       row.append(labels, actions);
       fragment.append(row);
     }

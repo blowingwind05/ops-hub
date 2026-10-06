@@ -1,7 +1,10 @@
 """Exercise real SFTP packets using OpenSSH's local subsystem in a temporary tree."""
 
 import json
+import asyncio
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -79,7 +82,8 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
         listing = await self.get()
         self.assertEqual(listing['home'], str(self.remote))
         self.assertEqual(len(listing['entries']), 4)
-        self.assertFalse(listing['capabilities']['edit'])
+        self.assertTrue(listing['capabilities']['edit'])
+        self.assertTrue(listing['capabilities']['trash'])
         self.assertEqual((await self.get(path='~/link'))['path'], str(self.remote / '目录'))
         self.assertEqual((await self.get(path='~'))['path'], str(self.remote))
         arguments = json.loads(self.arguments.read_text())
@@ -111,7 +115,7 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
         await self.action('rename', status=409, path=entry['path'], name='lost.txt', revision=entry['revision'])
         self.assertEqual((self.remote / 'existing.txt').read_text(), 'keep')
 
-    async def test_upload_binary_empty_duplicate_download_and_readonly_text(self):
+    async def test_upload_binary_empty_duplicate_download_and_text(self):
         data = b'\x00\xff' * (512 * 1024)
         await self.upload(data)
         self.assertEqual((self.remote / '上传.bin').read_bytes(), data)
@@ -124,7 +128,7 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
         (self.remote / 'text.txt').write_bytes('中文\r\n'.encode())
         text = await self.get('/api/files/text', path=str(self.remote / 'text.txt'))
         self.assertEqual(text['content'], '中文\r\n')
-        self.assertTrue(text['readonly'])
+        self.assertFalse(text.get('readonly', False))
         await self.get('/api/files/text', status=415, path=str(self.remote / '上传.bin'))
         (self.remote / 'text-link').symlink_to('text.txt')
         await self.get('/api/files/text', status=400, path=str(self.remote / 'text-link'))
@@ -136,9 +140,9 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
         for host in ['-oProxyCommand=bad', 'example.com', 'unknown', 'broken-test']:
             result = await self.get(status=502 if host == 'broken-test' else 400, host=host)
             self.assertIn('error', result)
-        for action in ['delete', 'save', 'purge', 'empty_trash']:
+        for action in ['delete', 'save', 'purge', 'unknown-action']:
             await self.action(action, status=400)
-        await self.get('/api/files/trash', status=400)
+        self.assertEqual((await self.get('/api/files/trash'))['entries'], [])
         for headers in [{}, {'Origin': 'http://evil.example', 'X-Ops-Hub-Request': '1'}]:
             response = await self.client.post('/api/files/action', params={'host': 'remote-test'},
                                               json={'action': 'mkdir', 'name': 'forbidden'}, headers=headers)
@@ -173,6 +177,233 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
             result = await self.upload(b'last write fails', filename='unconfirmed.txt', status=507)
         self.assertIn('磁盘空间不足', result['error'])
         self.assertFalse((self.remote / 'unconfirmed.txt').exists())
+        self.assertFalse(list(self.remote.glob('.ops-hub-upload-*')))
+
+    async def test_edit_backup_restore_permissions_and_content_conflicts(self):
+        path = self.remote / 'settings.txt'
+        path.write_bytes('中文\r\nsecond\r\n'.encode())
+        path.chmod(0o640)
+        original_stat = path.stat()
+        text = await self.get('/api/files/text', path=str(path))
+        saved = await self.action('save', path=str(path), content='updated\r\n', revision=text['revision'])
+        self.assertEqual(path.read_bytes(), b'updated\r\n')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        self.assertEqual((path.stat().st_uid, path.stat().st_gid), (original_stat.st_uid, original_stat.st_gid))
+        self.assertEqual((await self.get('/api/files/text', path=str(path)))['revision'], saved['revision'])
+        records = (await self.get('/api/files/trash'))['entries']
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['operation'], 'edit')
+        await self.action('restore', status=409, id=records[0]['id'])
+        restored = self.remote / 'restored.txt'
+        await self.action('restore', id=records[0]['id'], destination=str(restored))
+        self.assertEqual(restored.read_bytes(), '中文\r\nsecond\r\n'.encode())
+        self.assertEqual(restored.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(int(restored.stat().st_mtime), int(original_stat.st_mtime))
+        self.assertEqual(path.read_bytes(), b'updated\r\n')
+        current = await self.get('/api/files/text', path=str(path))
+        metadata = path.stat()
+        path.write_bytes(b'changed\r\n')  # Same length and same SFTP timestamp.
+        os.utime(path, (metadata.st_atime, metadata.st_mtime))
+        self.assertEqual(path.stat().st_size, metadata.st_size)
+        await self.action('save', status=409, path=str(path), content='must not save', revision=current['revision'])
+        self.assertEqual(path.read_bytes(), b'changed\r\n')
+        self.assertEqual((await self.get('/api/files/trash'))['entries'], [])
+        await self.action('save', status=400, path=str(path), content='no version')
+        await self.action('save', status=400, path=str(path), content='bad\x00text', revision=current['revision'])
+        with patch.object(remote_files, 'TEXT_LIMIT', 2):
+            await self.action('save', status=413, path=str(path), content='long', revision=current['revision'])
+
+    async def test_edit_failure_retains_original_and_backup(self):
+        path = self.remote / 'settings.txt'
+        path.write_text('original')
+        text = await self.get('/api/files/text', path=str(path))
+        with patch.object(paramiko.SFTPClient, 'posix_rename', side_effect=OSError('Operation unsupported')):
+            await self.action('save', status=400, path=str(path), content='updated', revision=text['revision'])
+        self.assertEqual(path.read_text(), 'original')
+        records = (await self.get('/api/files/trash'))['entries']
+        self.assertEqual(len(records), 1)
+        self.assertEqual((self.remote / remote_files.TRASH_NAME / records[0]['id'] / 'data').read_text(), 'original')
+        self.assertFalse(list(self.remote.glob('.ops-hub-write-*')))
+        archive = remote_files.RemoteFiles.archive
+        def modified_after_backup(connection, *args):
+            result = archive(connection, *args)
+            path.write_text('external modification')
+            return result
+        with patch.object(remote_files.RemoteFiles, 'archive', modified_after_backup):
+            await self.action('save', status=409, path=str(path), content='lost', revision=text['revision'])
+        self.assertEqual(path.read_text(), 'external modification')
+        self.assertEqual(len((await self.get('/api/files/trash'))['entries']), 2)
+        self.assertFalse(list(self.remote.glob('.ops-hub-write-*')))
+
+    async def test_trash_directory_links_restore_and_permanent_delete(self):
+        folder = self.remote / 'folder'
+        folder.mkdir()
+        nested = folder / 'nested'
+        nested.mkdir()
+        (nested / 'data.txt').write_text('nested content')
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'keep.txt').write_text('keep')
+        (folder / 'link').symlink_to(outside, target_is_directory=True)
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'folder')
+        record = await self.action('delete', path=str(folder), revision=entry['revision'])
+        self.assertFalse(folder.exists())
+        self.assertTrue((self.remote / remote_files.TRASH_NAME / record['id'] / 'data/nested/data.txt').exists())
+        await self.action('restore', id=record['id'])
+        self.assertEqual((nested / 'data.txt').read_text(), 'nested content')
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'folder')
+        record = await self.action('delete', path=str(folder), revision=entry['revision'])
+        await self.action('purge', id=record['id'])
+        self.assertEqual((outside / 'keep.txt').read_text(), 'keep')
+        self.assertFalse((self.remote / remote_files.TRASH_NAME / record['id']).exists())
+        link = self.remote / 'broken-link'
+        link.symlink_to('missing')
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'broken-link')
+        record = await self.action('delete', path=str(link), revision=entry['revision'])
+        self.assertTrue((await self.get('/api/files/trash'))['entries'][0]['recoverable'])
+        await self.action('restore', id=record['id'])
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), 'missing')
+        self.assertEqual(list(self.local.iterdir()), [])
+
+    async def test_trash_protected_paths_links_and_record_identifiers(self):
+        path = self.remote / 'file.txt'
+        path.write_text('keep')
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'file.txt')
+        record = await self.action('delete', path=str(path), revision=entry['revision'])
+        trash = self.remote / remote_files.TRASH_NAME
+        self.assertEqual(trash.stat().st_mode & 0o777, 0o700)
+        container = trash / record['id']
+        self.assertEqual(container.stat().st_mode & 0o777, 0o700)
+        await self.get(path=str(trash), status=403)
+        for source in [Path('/'), self.remote, self.remote / '.local']:
+            await self.action('delete', status=400, path=str(source), revision='any')
+        for operation in ['restore', 'purge']:
+            await self.action(operation, status=400, id='../outside')
+        external = self.root / 'external-trash'
+        external.mkdir()
+        (external / 'keep').write_text('keep')
+        linked_id = 'a' * 32
+        (trash / linked_id).symlink_to(external, target_is_directory=True)
+        await self.action('purge', status=400, id=linked_id)
+        await self.action('restore', status=400, id=linked_id)
+        (container / 'record.json').write_text(json.dumps({**record, 'id': '../outside'}))
+        self.assertEqual((await self.get('/api/files/trash'))['entries'][0]['id'], record['id'])
+        await self.action('restore', id=record['id'])
+        self.assertEqual(path.read_text(), 'keep')
+        self.assertEqual((external / 'keep').read_text(), 'keep')
+        (trash / linked_id).unlink()
+        shutil.rmtree(self.remote / '.local')
+        (self.remote / '.local').symlink_to(external)
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'file.txt')
+        await self.action('delete', status=400, path=str(path), revision=entry['revision'])
+        await self.get('/api/files/trash', status=400)
+        await self.action('empty_trash', status=400)
+        self.assertEqual(path.read_text(), 'keep')
+
+    async def test_empty_trash_partial_failure_and_corrupt_records(self):
+        records = []
+        for name in ['one.txt', 'two.txt']:
+            path = self.remote / name
+            path.write_text(name)
+            entry = next(item for item in (await self.get())['entries'] if item['name'] == name)
+            records.append(await self.action('delete', path=str(path), revision=entry['revision']))
+        trash = self.remote / remote_files.TRASH_NAME
+        failed_id = records[0]['id']
+        failed_container = trash / failed_id
+        remove_tree = remote_files.RemoteFiles.remove_tree
+        def failed_remove(connection, path):
+            if path == str(failed_container / 'data'):
+                raise PermissionError(13, 'denied')
+            return remove_tree(connection, path)
+        with patch.object(remote_files.RemoteFiles, 'remove_tree', failed_remove):
+            result = await self.action('empty_trash')
+        self.assertEqual(result['deleted'], 1)
+        self.assertEqual(result['errors'][0]['id'], failed_id)
+        self.assertTrue((failed_container / 'record.json').exists())
+        self.assertTrue((failed_container / 'data').exists())
+        (failed_container / 'record.json').write_text('bad JSON')
+        listing = (await self.get('/api/files/trash'))['entries']
+        self.assertFalse(listing[0]['recoverable'])
+        await self.action('restore', status=400, id=failed_id)
+        await self.action('purge', id=failed_id)
+        orphan = trash / ('b' * 32)
+        orphan.mkdir()
+        (orphan / 'record.json').write_text(json.dumps({**records[0], 'time': 10**400}))
+        self.assertFalse((await self.get('/api/files/trash'))['entries'][0]['recoverable'])
+        result = await self.action('empty_trash')
+        self.assertEqual(result, {'deleted': 1, 'errors': []})
+        self.assertEqual((await self.get('/api/files/trash'))['entries'], [])
+
+    async def test_cross_filesystem_trash_failure_keeps_source(self):
+        path = self.remote / 'source.txt'
+        path.write_text('preserved')
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'source.txt')
+        rename = remote_files.RemoteFiles.rename_new
+        def different_filesystem(connection, source, destination):
+            if source == str(path):
+                raise OSError(18, 'cross device')
+            return rename(connection, source, destination)
+        with patch.object(remote_files.RemoteFiles, 'rename_new', different_filesystem):
+            await self.action('delete', status=400, path=str(path), revision=entry['revision'])
+        self.assertEqual(path.read_text(), 'preserved')
+        self.assertEqual((await self.get('/api/files/trash'))['entries'], [])
+
+    async def test_concurrent_saves_have_one_winner(self):
+        path = self.remote / 'shared.txt'
+        path.write_text('original')
+        text = await self.get('/api/files/text', path=str(path))
+        async def save(content):
+            response = await self.client.post('/api/files/action', params={'host': 'remote-test'},
+                json={'action': 'save', 'path': str(path), 'content': content, 'revision': text['revision']}, headers=self.headers)
+            await response.read()
+            return response.status
+        statuses = await asyncio.gather(save('first update'), save('second update'))
+        self.assertEqual(sorted(statuses), [200, 409])
+        self.assertIn(path.read_text(), ['first update', 'second update'])
+        self.assertEqual(len((await self.get('/api/files/trash'))['entries']), 1)
+
+    async def test_restore_cleanup_warning_and_linked_record_purge(self):
+        path = self.remote / 'recover.txt'
+        path.write_text('recoverable')
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'recover.txt')
+        record = await self.action('delete', path=str(path), revision=entry['revision'])
+        with patch.object(remote_files.RemoteFiles, 'purge_record', side_effect=PermissionError(13, 'denied')):
+            restored = await self.action('restore', id=record['id'])
+        self.assertTrue(restored['warning'])
+        self.assertEqual(path.read_text(), 'recoverable')
+        listing = (await self.get('/api/files/trash'))['entries']
+        self.assertFalse(listing[0]['recoverable'])
+        await self.action('purge', id=record['id'])
+        entry = next(item for item in (await self.get())['entries'] if item['name'] == 'recover.txt')
+        record = await self.action('delete', path=str(path), revision=entry['revision'])
+        container = self.remote / remote_files.TRASH_NAME / record['id']
+        outside = self.root / 'outside-record.json'
+        outside.write_text(json.dumps(record))
+        (container / 'record.json').unlink()
+        (container / 'record.json').symlink_to(outside)
+        self.assertFalse((await self.get('/api/files/trash'))['entries'][0]['recoverable'])
+        await self.action('restore', status=400, id=record['id'])
+        await self.action('purge', id=record['id'])
+        self.assertEqual(json.loads(outside.read_text())['id'], record['id'])
+
+    async def test_remote_close_failure_does_not_publish_upload(self):
+        class FailedCloseClient(paramiko.SFTPClient):
+            def _async_request(client, fileobj, command, *args):
+                identifier = super()._async_request(fileobj, command, *args)
+                if command == paramiko.sftp.CMD_CLOSE:
+                    client.failed_close = identifier
+                return identifier
+
+            def _read_response(client, waitfor=None):
+                result = super()._read_response(waitfor)
+                if waitfor is not None and waitfor == getattr(client, 'failed_close', None):
+                    raise OSError(28, 'remote close failed')
+                return result
+
+        with patch.object(remote_files.paramiko, 'SFTPClient', FailedCloseClient):
+            await self.upload(b'not confirmed', filename='unconfirmed-close.txt', status=507)
+        self.assertFalse((self.remote / 'unconfirmed-close.txt').exists())
         self.assertFalse(list(self.remote.glob('.ops-hub-upload-*')))
 
 
