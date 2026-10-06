@@ -25,6 +25,7 @@ class ConfigurationTests(unittest.TestCase):
         settings = self.load('')
         self.assertEqual(settings.listen, ('127.0.0.1',))
         self.assertEqual(settings.port, 8088)
+        self.assertEqual(settings.upload_limit, 0)
         self.assertEqual(settings.directory, Path.home().resolve())
         self.assertEqual(load_settings(Path(__file__).parent / 'config.example.toml'), settings)
 
@@ -51,6 +52,12 @@ ssh_config = "ssh.conf"
         with self.assertRaises(ValueError):
             self.load('[terminal]\ndirectory = "missing-directory"\n')
 
+    def test_upload_limit_zero_is_unlimited_and_positive_values_are_mib(self):
+        self.assertEqual(Settings().upload_limit, 0)
+        self.assertEqual(self.load('[files]\nupload_limit_mib = 0\n').upload_limit, 0)
+        self.assertEqual(self.load('[files]\nupload_limit_mib = 256\n').upload_limit, 256 * 1024 * 1024)
+        self.assertEqual(self.load('[files]\nupload_limit_mib = 1\n').upload_limit, 1024 * 1024)
+
     def test_mistyped_keys_and_invalid_values_fail_at_startup(self):
         invalid = ['[network]\nlisten = ["127.0.0.1"]',
                    '[server]\nlistne = ["127.0.0.1"]',
@@ -66,6 +73,10 @@ ssh_config = "ssh.conf"
                    '[access]\nallowed_clients = ["invalid-cidr"]',
                    '[access]\nallowed_clients = []',
                    '[terminal]\nssh_config = 42',
+                   '[files]\nupload_limit_mib = -1',
+                   '[files]\nupload_limit_mib = true',
+                   '[files]\nupload_limit_mib = 1.5',
+                   '[files]\nupload_limit_mib = "0"',
                    'invalid toml = [']
         for text in invalid:
             with self.subTest(text=text), self.assertRaises(ValueError):

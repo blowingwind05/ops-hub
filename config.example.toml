@@ -11,3 +11,7 @@ allowed_clients = ["127.0.0.0/8", "::1/128"]
 [terminal]
 directory = "~"
 ssh_config = "~/.ssh/config"
+
+[files]
+# Maximum size of each uploaded file in MiB; 0 means unlimited.
+upload_limit_mib = 0

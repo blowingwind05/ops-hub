@@ -1,5 +1,6 @@
 """Exercise real SFTP packets using OpenSSH's local subsystem in a temporary tree."""
 
+import io
 import json
 import asyncio
 import os
@@ -15,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import remote_files
 import server
 import paramiko
+from configuration import load_settings
 
 
 @unittest.skipUnless(Path('/usr/lib/openssh/sftp-server').exists(), 'OpenSSH sftp-server required')
@@ -60,6 +62,18 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, status, await response.text())
         return await response.json()
 
+    async def configure_upload_limit(self, mib):
+        config = self.root / 'settings.toml'
+        config.write_text(f'[files]\nupload_limit_mib = {mib}\n')
+        await self.client.close()
+        self.port_patch.stop()
+        with patch.object(server, 'CONFIG', load_settings(config)):
+            self.client = TestClient(TestServer(server.create_app()))
+        await self.client.start_server()
+        self.port_patch = patch.object(server, 'PORT', self.client.port)
+        self.port_patch.start()
+        self.headers = {'Origin': str(self.client.make_url('/')).rstrip('/'), 'X-Ops-Hub-Request': '1'}
+
     async def action(self, action, status=200, **payload):
         response = await self.client.post('/api/files/action', params={'host': 'remote-test'},
                                           json={'action': action, **payload}, headers=self.headers)
@@ -68,7 +82,7 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
 
     async def upload(self, data, filename='上传.bin', status=200):
         form = FormData(quote_fields=False)
-        form.add_field('file', data, filename=filename)
+        form.add_field('file', io.BytesIO(data), filename=filename)
         response = await self.client.post('/api/files/upload', params={'host': 'remote-test'},
                                           data=form, headers=self.headers)
         self.assertEqual(response.status, status, await response.text())
@@ -155,9 +169,19 @@ class RemoteFileTests(unittest.IsolatedAsyncioTestCase):
             await self.upload(b'partial', filename='failed.txt', status=400)
         self.assertFalse((self.remote / 'failed.txt').exists())
         self.assertFalse(list(self.remote.glob('.ops-hub-upload-*')))
-        with patch.object(remote_files, 'UPLOAD_LIMIT', 3):
-            await self.upload(b'too large', filename='large.txt', status=413)
+        self.assertEqual((await self.get())['upload_limit'], 0)
+        await self.configure_upload_limit(1)
+        self.assertEqual((await self.get())['upload_limit'], 1024 * 1024)
+        await self.upload(b'a' * (1024 * 1024), filename='boundary.bin')
+        self.assertEqual((self.remote / 'boundary.bin').stat().st_size, 1024 * 1024)
+        error = await self.upload(b'a' * (1024 * 1024 + 1), filename='large.txt', status=413)
+        self.assertIn('1 MiB', error['error'])
         self.assertFalse((self.remote / 'large.txt').exists())
+        self.assertFalse(list(self.remote.glob('.ops-hub-upload-*')))
+        await self.configure_upload_limit(0)
+        self.assertEqual((await self.get())['upload_limit'], 0)
+        await self.upload(b'a' * (1024 * 1024 + 1), filename='unlimited.bin')
+        self.assertEqual((self.remote / 'unlimited.bin').stat().st_size, 1024 * 1024 + 1)
 
     async def test_pipelined_write_failure_is_not_reported_as_success(self):
         class FailedWriteClient(paramiko.SFTPClient):

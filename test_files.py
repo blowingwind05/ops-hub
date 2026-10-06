@@ -1,5 +1,6 @@
 """File API integration tests; all writes use isolated temporary directories."""
 
+import io
 import os
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import file_manager
 import server
+from configuration import load_settings
 
 
 class FileTests(unittest.IsolatedAsyncioTestCase):
@@ -38,6 +40,18 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get('/api/files', params={'path': str(path or self.work)})
         self.assertEqual(response.status, 200, await response.text())
         return await response.json()
+
+    async def configure_upload_limit(self, mib):
+        config = self.home.parent / 'settings.toml'
+        config.write_text(f'[files]\nupload_limit_mib = {mib}\n')
+        await self.client.close()
+        self.port_patch.stop()
+        with patch.object(server, 'CONFIG', load_settings(config)):
+            self.client = TestClient(TestServer(server.create_app()))
+        await self.client.start_server()
+        self.port_patch = patch.object(server, 'PORT', self.client.port)
+        self.port_patch.start()
+        self.headers = {'Origin': str(self.client.make_url('/')).rstrip('/'), 'X-Ops-Hub-Request': '1'}
 
     async def action(self, action, status=200, **payload):
         response = await self.client.post('/api/files/action', json={'action': action, **payload}, headers=self.headers)
@@ -348,7 +362,7 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
     async def test_upload_download_duplicates_and_size_cleanup(self):
         async def upload(content, name='上传.bin'):
             form = FormData(quote_fields=False)
-            form.add_field('file', content, filename=name, content_type='application/octet-stream')
+            form.add_field('file', io.BytesIO(content), filename=name, content_type='application/octet-stream')
             return await self.client.post('/api/files/upload', params={'path': str(self.work)}, data=form, headers=self.headers)
         response = await upload(b'\x00\xffbinary')
         self.assertEqual(response.status, 200, await response.text())
@@ -360,11 +374,20 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.read(), b'\x00\xffbinary')
         self.assertEqual(response.content_type, 'application/octet-stream')
         self.assertIn('attachment;', response.headers['Content-Disposition'])
-        with patch.object(file_manager, 'UPLOAD_LIMIT', 4):
-            response = await upload(b'too large', 'limit.txt')
-            self.assertEqual(response.status, 413)
+        self.assertEqual((await self.listing())['upload_limit'], 0)
+        await self.configure_upload_limit(1)
+        self.assertEqual((await self.listing())['upload_limit'], 1024 * 1024)
+        response = await upload(b'a' * (1024 * 1024), 'boundary.bin')
+        self.assertEqual(response.status, 200, await response.text())
+        response = await upload(b'a' * (1024 * 1024 + 1), 'limit.txt')
+        self.assertEqual(response.status, 413)
+        self.assertIn('1 MiB', (await response.json())['error'])
         self.assertFalse((self.work / 'limit.txt').exists())
         self.assertFalse(list(self.work.glob('.ops-hub-upload-*')))
+        await self.configure_upload_limit(0)
+        self.assertEqual((await self.listing())['upload_limit'], 0)
+        response = await upload(b'a' * (1024 * 1024 + 1), 'unlimited.bin')
+        self.assertEqual(response.status, 200, await response.text())
 
     async def test_binary_large_special_files_and_links_cannot_be_edited(self):
         (self.work / 'binary').write_bytes(b'\x00\xff')

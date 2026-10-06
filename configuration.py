@@ -15,6 +15,7 @@ class Settings:
     allowed_clients: tuple = (ipaddress.ip_network('127.0.0.0/8'), ipaddress.ip_network('::1/128'))
     directory: Path = field(default_factory=Path.home)
     ssh_config: Path = field(default_factory=lambda: Path.home() / '.ssh/config')
+    upload_limit: int = 0  # Bytes; zero means unlimited.
 
 
 def string_list(value, name):
@@ -45,7 +46,7 @@ def load_settings(path):
     with path.open('rb') as stream:
         document = tomllib.load(stream)
     schema = {'server': {'listen', 'port'}, 'access': {'allowed_hosts', 'allowed_clients'},
-              'terminal': {'directory', 'ssh_config'}}
+              'terminal': {'directory', 'ssh_config'}, 'files': {'upload_limit_mib'}}
     for section, values in document.items():
         if section not in schema:
             raise ValueError(f'Unknown configuration section: {section}')
@@ -57,6 +58,10 @@ def load_settings(path):
     server = document.get('server', {})
     access = document.get('access', {})
     terminal = document.get('terminal', {})
+    files = document.get('files', {})
+    upload_limit_mib = files.get('upload_limit_mib', 0)
+    if type(upload_limit_mib) is not int or upload_limit_mib < 0:
+        raise ValueError('files.upload_limit_mib must be a non-negative integer (0 means unlimited).')
     listen = tuple(str(ipaddress.ip_address(value)) for value in
                    string_list(server.get('listen', list(defaults.listen)), 'server.listen'))
     port = server.get('port', defaults.port)
@@ -71,7 +76,8 @@ def load_settings(path):
     if not directory.is_dir():
         raise ValueError('terminal.directory must be an existing directory.')
     return Settings(listen=listen, port=port, allowed_hosts=hosts, allowed_clients=clients,
-                    directory=directory, ssh_config=ssh_config)
+                    directory=directory, ssh_config=ssh_config,
+                    upload_limit=upload_limit_mib * 1024 * 1024)
 
 
 def listener_matches(address, listeners):

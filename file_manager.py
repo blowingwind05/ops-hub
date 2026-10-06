@@ -4,26 +4,24 @@ import asyncio
 import ctypes
 import errno
 import functools
-import hashlib
 import json
 import os
-import re
 import shutil
 import stat
 import tempfile
 import threading
-import time
-import uuid
 from pathlib import Path
-from urllib.parse import quote
 
 from aiohttp import web
 
-TEXT_LIMIT = 2 * 1024 * 1024
-UPLOAD_LIMIT = 256 * 1024 * 1024
-ENTRY_LIMIT = 10000
+from file_common import (
+    ENTRY_LIMIT, TEXT_LIMIT, TRASH_NAME, download_headers, encode_text,
+    file_entry, file_kind, listing_result, metadata_revision, name_value,
+    new_trash_record, path_input, receive_upload, upload_part, valid_trash_id,
+    validate_trash_id,
+)
+
 WRITE_LOCK = threading.RLock()
-TRASH_NAME = '.local/share/ops-hub/trash'
 
 
 def fail(status, message):
@@ -65,13 +63,7 @@ def endpoint(handler):
 
 
 def path_value(value, home, follow=False):
-    if not isinstance(value, str) or '\x00' in value:
-        raise ValueError('无效的文件路径。')
-    value = value or str(home)
-    if value == '~' or value.startswith('~/'):
-        value = str(home) + value[1:]
-    if not os.path.isabs(value):
-        raise ValueError('请输入绝对路径，或使用 ~/ 开头的路径。')
+    value = path_input(value, home)
     path = Path(os.path.abspath(value))
     # Resolve ancestors, but leave the final link intact for rename/trash.
     checked = path.resolve() if follow else path.parent.resolve() / path.name
@@ -82,17 +74,10 @@ def path_value(value, home, follow=False):
     return checked
 
 
-def name_value(value):
-    if (not isinstance(value, str) or not value or value in ('.', '..')
-            or '/' in value or '\x00' in value):
-        raise ValueError('请输入有效的文件名，名称不能包含 /。')
-    return value
-
-
 def revision(metadata):
     fields = (metadata.st_dev, metadata.st_ino, metadata.st_mode,
               metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
-    return hashlib.sha256(repr(fields).encode()).hexdigest()
+    return metadata_revision(fields)
 
 
 def check_revision(path, expected):
@@ -119,7 +104,7 @@ def regular_bytes(path):
     return data, metadata
 
 
-def directory_listing(path, home):
+def directory_listing(path, home, upload_limit=0):
     path = path_value(str(path), home, follow=True)
     entries = []
     truncated = False
@@ -130,24 +115,21 @@ def directory_listing(path, home):
                 break
             try:
                 metadata = entry.stat(follow_symlinks=False)
-                mode = metadata.st_mode
-                kind = 'directory' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode) else 'symlink' if stat.S_ISLNK(mode) else 'special'
+                kind = file_kind(metadata.st_mode)
                 try:
                     path_value(entry.path, home)
                     protected = False
                 except web.HTTPForbidden:
                     protected = True
-                entries.append({'name': entry.name, 'path': str(path / entry.name),
-                                'kind': kind, 'target_directory': entry.is_dir() if kind == 'symlink' else False,
-                                'size': metadata.st_size, 'modified': metadata.st_mtime,
-                                'mode': stat.filemode(mode), 'revision': revision(metadata), 'protected': protected,
-                                'link_target': os.readlink(entry.path) if kind == 'symlink' else None})
+                entries.append(file_entry(
+                    entry.name, path / entry.name, metadata, revision(metadata), protected=protected,
+                    target_directory=entry.is_dir() if kind == 'symlink' else False,
+                    link_target=os.readlink(entry.path) if kind == 'symlink' else None))
             except OSError:
                 entries.append({'name': entry.name, 'path': str(path / entry.name), 'kind': 'unavailable',
                                 'size': None, 'modified': None, 'mode': '—', 'revision': None, 'protected': True})
-    entries.sort(key=lambda item: (not (item['kind'] == 'directory' or item.get('target_directory')), item['name'].casefold()))
-    return {'path': str(path), 'parent': str(path.parent), 'root': '/', 'home': str(home),
-            'entries': entries, 'truncated': truncated, 'text_limit': TEXT_LIMIT, 'upload_limit': UPLOAD_LIMIT}
+    return listing_result(path, home, entries, truncated,
+                          text_limit=TEXT_LIMIT, upload_limit=upload_limit)
 
 
 def rename_new(source, destination):
@@ -164,11 +146,9 @@ def archive(path, home, operation):
     if trash.resolve() != trash:
         raise ValueError('回收站路径包含符号链接，无法执行此操作。')
     trash.mkdir(parents=True, exist_ok=True, mode=0o700)
-    identifier = uuid.uuid4().hex
-    container = trash / identifier
+    record = new_trash_record(path, operation)
+    container = trash / record['id']
     container.mkdir(mode=0o700)
-    record = {'id': identifier, 'path': str(path), 'name': path.name,
-              'time': time.time(), 'operation': operation}
     try:
         (container / 'record.json').write_text(json.dumps(record, ensure_ascii=True))
         if operation == 'edit':
@@ -204,11 +184,7 @@ def trash_records(home):
 
 
 def write_text(path, text, home, expected=None, create=False):
-    if not isinstance(text, str) or '\x00' in text:
-        raise ValueError('内容必须是文本，不能包含空字节。')
-    data = text.encode('utf-8')
-    if len(data) > TEXT_LIMIT:
-        raise web.HTTPRequestEntityTooLarge(max_size=TEXT_LIMIT, actual_size=len(data), text='文本编辑限制为 2 MiB。')
+    data = encode_text(text, TEXT_LIMIT)
     with WRITE_LOCK:
         metadata = None if create else check_revision(path, expected)
         if metadata is not None and not stat.S_ISREG(metadata.st_mode):
@@ -243,8 +219,7 @@ def write_text(path, text, home, expected=None, create=False):
 
 
 def trash_container(identifier, home):
-    if not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier):
-        raise ValueError('无效的回收站记录。')
+    validate_trash_id(identifier)
     container = Path(home) / TRASH_NAME / identifier
     if container.is_symlink() or container.resolve() != container:
         raise ValueError('回收站路径包含符号链接。')
@@ -276,7 +251,7 @@ def empty_trash(home):
     if trash.exists():
         # Use actual container names, not identifiers supplied by record.json.
         for container in list(trash.iterdir()):
-            if not re.fullmatch(r'[a-f0-9]{32}', container.name):
+            if not valid_trash_id(container.name):
                 continue
             try:
                 purge_record(container.name, home)
@@ -335,7 +310,7 @@ def mutate(payload, home):
         return archive(path, home, 'delete')
 
 
-def register_file_routes(app, home, remote_factory=None):
+def register_file_routes(app, home, remote_factory=None, *, upload_limit=0):
     connections = asyncio.Semaphore(4)
 
     def target(operation):
@@ -367,7 +342,7 @@ def register_file_routes(app, home, remote_factory=None):
     @target('listing')
     async def listing(request):
         path = path_value(request.query.get('path', ''), home, follow=True)
-        return web.json_response(await asyncio.to_thread(directory_listing, path, home))
+        return web.json_response(await asyncio.to_thread(directory_listing, path, home, upload_limit))
 
     @target('text')
     async def text(request):
@@ -382,10 +357,7 @@ def register_file_routes(app, home, remote_factory=None):
         path = path_value(request.query.get('path', ''), home)
         if not stat.S_ISREG((await asyncio.to_thread(path.lstat)).st_mode):
             raise ValueError('仅支持下载普通文件，请打开符号链接的目标路径。')
-        return web.FileResponse(path, headers={
-            'Content-Type': 'application/octet-stream',
-            'Content-Disposition': "attachment; filename*=UTF-8''" + quote(path.name, safe=''),
-        })
+        return web.FileResponse(path, headers=download_headers(path.name))
 
     @target('action')
     async def action(request):
@@ -399,22 +371,14 @@ def register_file_routes(app, home, remote_factory=None):
         directory = path_value(request.query.get('path', ''), home, follow=True)
         if not directory.is_dir():
             raise ValueError('请选择上传目录。')
-        reader = await request.multipart()
-        part = await reader.next()
-        if part is None or part.name != 'file' or not part.filename:
-            raise ValueError('请选择要上传的文件。')
-        destination = path_value(str(directory / name_value(part.filename)), home)
+        part = await upload_part(request)
+        destination = path_value(str(directory / part.filename), home)
         temporary = None
-        total = 0
         try:
             descriptor, name = await asyncio.to_thread(tempfile.mkstemp, dir=directory, prefix='.ops-hub-upload-')
             temporary = Path(name)
             with os.fdopen(descriptor, 'wb') as stream:
-                while chunk := await part.read_chunk(65536):
-                    total += len(chunk)
-                    if total > UPLOAD_LIMIT:
-                        raise web.HTTPRequestEntityTooLarge(max_size=UPLOAD_LIMIT, actual_size=total, text='单个文件上传限制为 256 MiB。')
-                    await asyncio.to_thread(stream.write, chunk)
+                total = await receive_upload(part, stream, upload_limit)
                 await asyncio.to_thread(stream.flush)
                 await asyncio.to_thread(os.fsync, stream.fileno())
             await asyncio.to_thread(os.link, temporary, destination)

@@ -340,6 +340,7 @@ async def shutdown(app):
 
 
 def create_app():
+    upload_limit = CONFIG.upload_limit
     # WebSocket disconnects end the receive loop. Do not also cancel the
     # handler on transport loss: cancellation can interrupt shell cleanup.
     app = web.Application(middlewares=[access_control], client_max_size=16 * 1024 * 1024)
@@ -351,9 +352,9 @@ def create_app():
     def remote_files(host):
         if host not in {item['alias'] for item in configured_hosts()}:
             raise ValueError('请选择 SSH 配置中已有的服务器。')
-        return RemoteFiles(host, SSH_CONFIG, SSH_EXECUTABLE)
+        return RemoteFiles(host, SSH_CONFIG, SSH_EXECUTABLE, upload_limit=upload_limit)
 
-    register_file_routes(app, HOME_DIR, remote_files)
+    register_file_routes(app, HOME_DIR, remote_files, upload_limit=upload_limit)
     app.router.add_get('/ws', terminal)
     app.router.add_static('/static/', ROOT / 'static', show_index=False)
     return app

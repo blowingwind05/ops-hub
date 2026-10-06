@@ -1,7 +1,7 @@
 'use strict';
 
 const fileState = { path: '', parent: '', entries: [], loaded: false, loading: false, busy: false,
-  host: '', home: '', capabilities: {}, controller: null, truncated: false, editor: null,
+  host: '', home: '', capabilities: {}, uploadLimit: 0, controller: null, truncated: false, editor: null,
   operation: null, drag: null, uploadDragDepth: 0 };
 const fileLocations = new Map();
 
@@ -229,7 +229,8 @@ async function loadFiles(path = fileState.path) {
     const data = await fileRequest(fileURL('/api/files', { path: path || '' }, host), { signal: controller.signal });
     if (controller !== fileState.controller || host !== selectedHost || currentView !== 'files') return;
     Object.assign(fileState, { host, home: data.home, capabilities: data.capabilities || {},
-      path: data.path, parent: data.parent, entries: data.entries, loaded: true, truncated: data.truncated });
+      path: data.path, parent: data.parent, entries: data.entries, loaded: true, truncated: data.truncated,
+      uploadLimit: data.upload_limit || 0 });
     fileLocations.set(host, data.path);
     byId('files-path').value = data.path;
     editFilePath(false);
@@ -250,7 +251,8 @@ function loadFileTarget() {
   fileState.controller?.abort();
   if (fileState.host !== selectedHost) {
     Object.assign(fileState, { host: selectedHost, path: fileLocations.get(selectedHost) || '',
-      parent: '', home: '', entries: [], loaded: false, capabilities: selectedHost ? { edit: false, trash: false } : {} });
+      parent: '', home: '', entries: [], loaded: false, uploadLimit: 0,
+      capabilities: selectedHost ? { edit: false, trash: false } : {} });
     byId('files-path').value = fileState.path;
   }
   return loadFiles();
@@ -484,7 +486,9 @@ async function uploadFiles(files) {
   try {
     for (const [index, file] of files.entries()) {
       showUploadProgress(file, index, files.length, completed);
-      if (file.size > 256 * 1024 * 1024) { errors.push(file.name + '：超过 256 MiB'); continue; }
+      if (fileState.uploadLimit && file.size > fileState.uploadLimit) {
+        errors.push(file.name + '：超过 ' + formatBytes(fileState.uploadLimit)); continue;
+      }
       try {
         await uploadWithProgress(file, path, index, files.length, completed);
         completed++;

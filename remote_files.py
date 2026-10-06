@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import posixpath
-import re
 import select
 import signal
 import socket
@@ -14,14 +13,17 @@ import stat
 import subprocess
 import tempfile
 import threading
-import time
 import uuid
-from urllib.parse import quote
 
 import paramiko
 from aiohttp import web
 
-from file_manager import ENTRY_LIMIT, TEXT_LIMIT, TRASH_NAME, UPLOAD_LIMIT, name_value
+from file_common import (
+    ENTRY_LIMIT, TEXT_LIMIT, TRASH_NAME, download_headers, encode_text,
+    file_entry, file_kind, listing_result, metadata_revision, name_value,
+    new_trash_record, path_input, receive_upload, upload_part, valid_trash_id,
+    validate_trash_id,
+)
 
 REMOTE_LOCKS = {}
 RECORD_LIMIT = 65536
@@ -47,7 +49,7 @@ def remote_revision(metadata):
     # SFTP v3 exposes timestamps in whole seconds and has no inode/ctime field.
     fields = tuple(getattr(metadata, key, None) for key in
                    ('st_mode', 'st_size', 'st_mtime', 'st_uid', 'st_gid'))
-    return hashlib.sha256(repr(fields).encode()).hexdigest()
+    return metadata_revision(fields)
 
 
 def text_revision(metadata, data):
@@ -59,8 +61,9 @@ def inside(path, directory):
 
 
 class RemoteFiles:
-    def __init__(self, host, config, executable):
+    def __init__(self, host, config, executable, *, upload_limit=0):
         self.host, self.config, self.executable = host, config, executable
+        self.upload_limit = upload_limit
         self.socket = self.process = self.errors = self.client = None
         self.home = None
         self.write_lock = REMOTE_LOCKS.setdefault((str(config), host), threading.RLock())
@@ -128,13 +131,7 @@ class RemoteFiles:
             raise
 
     def path(self, value='', follow=False):
-        if not isinstance(value, str) or '\x00' in value:
-            raise ValueError('无效的文件路径。')
-        value = value or self.home
-        if value == '~' or value.startswith('~/'):
-            value = self.home + value[1:]
-        if not value.startswith('/'):
-            raise ValueError('请输入绝对路径，或使用 ~/ 开头的路径。')
+        value = path_input(value, self.home)
         value = posixpath.normpath(value)
         resolved = self.client.normalize(value if follow else posixpath.dirname(value))
         if not follow:
@@ -172,9 +169,7 @@ class RemoteFiles:
                 break
             name = name_value(metadata.filename)
             entry_path = posixpath.join(path, name)
-            mode = metadata.st_mode or 0
-            kind = ('directory' if stat.S_ISDIR(mode) else 'file' if stat.S_ISREG(mode)
-                    else 'symlink' if stat.S_ISLNK(mode) else 'special')
+            kind = file_kind(metadata.st_mode or 0)
             protected = inside(entry_path, posixpath.join(self.home, TRASH_NAME))
             target_directory, link_target = False, None
             if kind == 'symlink':
@@ -183,15 +178,11 @@ class RemoteFiles:
                     target_directory = stat.S_ISDIR(self.client.stat(entry_path).st_mode or 0)
                 except OSError:
                     pass
-            entries.append({'name': name, 'path': entry_path, 'kind': kind,
-                            'target_directory': target_directory, 'link_target': link_target,
-                            'size': metadata.st_size, 'modified': metadata.st_mtime,
-                            'mode': stat.filemode(mode), 'revision': remote_revision(metadata),
-                            'protected': protected})
-        entries.sort(key=lambda item: (not (item['kind'] == 'directory' or item['target_directory']), item['name'].casefold()))
-        return {'path': path, 'parent': posixpath.dirname(path), 'root': '/', 'home': self.home,
-                'entries': entries, 'truncated': truncated, 'text_limit': TEXT_LIMIT,
-                'upload_limit': UPLOAD_LIMIT, 'capabilities': {'edit': True, 'trash': True}}
+            entries.append(file_entry(
+                name, entry_path, metadata, remote_revision(metadata), protected=protected,
+                target_directory=target_directory, link_target=link_target))
+        return listing_result(path, self.home, entries, truncated, text_limit=TEXT_LIMIT,
+                              upload_limit=self.upload_limit, capabilities={'edit': True, 'trash': True})
 
     async def listing(self, request):
         return web.json_response(await self.call(self.listing_data, request.query.get('path', '')))
@@ -237,10 +228,7 @@ class RemoteFiles:
 
     async def download(self, request):
         path, stream, metadata = await self.call(self.open_regular, request.query.get('path', ''))
-        response = web.StreamResponse(headers={
-            'Content-Type': 'application/octet-stream',
-            'Content-Disposition': "attachment; filename*=UTF-8''" + quote(posixpath.basename(path), safe=''),
-        })
+        response = web.StreamResponse(headers=download_headers(posixpath.basename(path)))
         try:
             await response.prepare(request)
             while chunk := await self.call(stream.read, 131072):
@@ -380,11 +368,7 @@ class RemoteFiles:
                 raise
 
     def save_text(self, path, text, expected):
-        if not isinstance(text, str) or '\x00' in text:
-            raise ValueError('内容必须是文本，不能包含空字节。')
-        data = text.encode('utf-8')
-        if len(data) > TEXT_LIMIT:
-            raise web.HTTPRequestEntityTooLarge(max_size=TEXT_LIMIT, actual_size=len(data), text='文本编辑限制为 2 MiB。')
+        data = encode_text(text, TEXT_LIMIT)
         if not isinstance(expected, str) or not expected:
             raise ValueError('缺少文件版本，请重新打开后重试。')
         _, original, metadata = self.read_text(path)
@@ -425,8 +409,7 @@ class RemoteFiles:
         return directory
 
     def trash_container(self, identifier):
-        if not isinstance(identifier, str) or not re.fullmatch(r'[a-f0-9]{32}', identifier):
-            raise ValueError('无效的回收站记录。')
+        validate_trash_id(identifier)
         trash = self.trash_directory()
         if trash is None:
             raise FileNotFoundError(errno.ENOENT, 'Trash record missing')
@@ -458,11 +441,9 @@ class RemoteFiles:
 
     def archive(self, path, operation, content=None, metadata=None):
         trash = self.trash_directory(create=True)
-        identifier = uuid.uuid4().hex
-        container = posixpath.join(trash, identifier)
+        record = new_trash_record(path, operation)
+        container = posixpath.join(trash, record['id'])
         self.client.mkdir(container, mode=0o700)
-        record = {'id': identifier, 'path': path, 'name': posixpath.basename(path),
-                  'time': time.time(), 'operation': operation}
         try:
             self.publish(container, posixpath.join(container, 'record.json'),
                          [json.dumps(record, ensure_ascii=True).encode()])
@@ -491,7 +472,7 @@ class RemoteFiles:
             records = []
             if trash is not None:
                 for entry in self.client.listdir_attr(trash):
-                    if not re.fullmatch(r'[a-f0-9]{32}', entry.filename) or not stat.S_ISDIR(entry.st_mode or 0):
+                    if not valid_trash_id(entry.filename) or not stat.S_ISDIR(entry.st_mode or 0):
                         continue
                     container = self.trash_container(entry.filename)
                     try:
@@ -554,7 +535,7 @@ class RemoteFiles:
         deleted, errors = 0, []
         if trash is not None:
             for entry in self.client.listdir_attr(trash):
-                if not re.fullmatch(r'[a-f0-9]{32}', entry.filename):
+                if not valid_trash_id(entry.filename):
                     continue
                 try:
                     self.purge_record(entry.filename)
@@ -568,21 +549,12 @@ class RemoteFiles:
         metadata = await self.call(self.client.stat, directory)
         if not stat.S_ISDIR(metadata.st_mode or 0):
             raise ValueError('请选择上传目录。')
-        reader = await request.multipart()
-        part = await reader.next()
-        if part is None or part.name != 'file' or not part.filename:
-            raise ValueError('请选择要上传的文件。')
-        destination = await self.call(self.path, posixpath.join(directory, name_value(part.filename)))
+        part = await upload_part(request)
+        destination = await self.call(self.path, posixpath.join(directory, part.filename))
         await self.call(self.ensure_new, destination)
         # Spool only on the hub, then transfer. No final remote name until all bytes are acknowledged.
         with tempfile.TemporaryFile() as spool:
-            total = 0
-            while chunk := await part.read_chunk(65536):
-                total += len(chunk)
-                if total > UPLOAD_LIMIT:
-                    raise web.HTTPRequestEntityTooLarge(max_size=UPLOAD_LIMIT, actual_size=total,
-                                                       text='单个文件上传限制为 256 MiB。')
-                await asyncio.to_thread(spool.write, chunk)
+            total = await receive_upload(part, spool, self.upload_limit)
             spool.seek(0)
             await self.call(self.publish, directory, destination, iter(lambda: spool.read(65536), b''))
         return web.json_response({'path': destination, 'size': total})
